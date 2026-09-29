@@ -1,6 +1,6 @@
 [package]
 name = "reverb-rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A drop-in Rust/Tokio replacement for the Laravel Reverb WebSocket server"
 license = "MIT"
