@@ -37,13 +37,7 @@ fn scenarios() -> Vec<Scenario> {
             1000,
             100,
         ),
-        Scenario::new(
-            "large-payload",
-            "500 subscribers, 300 events, 4 KB payload",
-            500,
-            300,
-            4096,
-        ),
+        Scenario::new("large-payload", "500 subscribers, 300 events, 4 KB payload", 500, 300, 4096),
         Scenario::new(
             "many-connections",
             "800 subscribers, 500 events, 256 B payload",
@@ -51,8 +45,16 @@ fn scenarios() -> Vec<Scenario> {
             500,
             256,
         ),
-        Scenario::new("idle", "800 idle subscribers (memory only)", 800, 1, 100)
-            .memory_only(),
+        Scenario::new("idle", "800 idle subscribers (memory only)", 800, 1, 100).memory_only(),
+        // The same work with both servers confined to a single core.
+        Scenario::new(
+            "one-core",
+            "500 subscribers, 500 events, 100 B payload — one core each",
+            500,
+            500,
+            100,
+        )
+        .on_one_core(),
     ]
 }
 
@@ -89,11 +91,8 @@ impl Server {
         mut command: Command,
         port: u16,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let child = command
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()?;
+        let child =
+            command.stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true).spawn()?;
 
         // The command is the server itself, so its own PID is the one to
         // account against.
@@ -141,8 +140,31 @@ async fn wait_for_port(
     Err(format!("nothing listening on port {port} after {timeout:?}").into())
 }
 
-fn reverb_rs_command(port: u16) -> Command {
-    let mut command = Command::new("./target/release/reverb-rs");
+/// Build a command, optionally confined to a set of CPUs.
+fn command_on(program: &str, args: &[&str], cpus: Option<&str>) -> Command {
+    let mut command = match cpus {
+        Some(list) => {
+            // `taskset` sets affinity and then execs, so the process keeps its
+            // PID and CPU accounting still points at the right place.
+            let mut c = Command::new("taskset");
+            c.arg("-c").arg(list).arg(program);
+            c
+        }
+        None => Command::new(program),
+    };
+
+    command.args(args);
+    command
+}
+
+fn reverb_rs_command(port: u16, cpus: Option<&str>) -> Command {
+    let mut command = command_on("./target/release/reverb-rs", &[], cpus);
+
+    // Match the runtime to the cores it is allowed to use, so a pinned server
+    // is not paying to schedule threads it cannot run.
+    if let Some(list) = cpus {
+        command.env("TOKIO_WORKER_THREADS", list.split(',').count().to_string());
+    }
 
     command
         .env("REVERB_APP_ID", APP_ID)
@@ -154,11 +176,10 @@ fn reverb_rs_command(port: u16) -> Command {
     command
 }
 
-fn reverb_php_command(checkout: &Path, port: u16) -> Command {
-    let mut command = Command::new("php");
+fn reverb_php_command(checkout: &Path, port: u16, cpus: Option<&str>) -> Command {
+    let mut command = command_on("php", &["bench/reverb-php-serve.php"], cpus);
 
     command
-        .arg("bench/reverb-php-serve.php")
         .env("REVERB_CHECKOUT", checkout)
         .env("BENCH_HOST", "127.0.0.1")
         .env("BENCH_PORT", port.to_string());
@@ -170,7 +191,7 @@ fn reverb_php_command(checkout: &Path, port: u16) -> Command {
 async fn run(
     label: &str,
     port: u16,
-    build: impl Fn(u16) -> Command,
+    build: impl Fn(u16, Option<&str>) -> Command,
     repeats: usize,
 ) -> BTreeMap<String, Option<BTreeMap<String, f64>>> {
     let mut results = BTreeMap::new();
@@ -181,7 +202,7 @@ async fn run(
         for attempt in 1..=repeats {
             eprintln!("  {label}: {} ({attempt}/{repeats})", scenario.name);
 
-            let server = match Server::start(build(port), port).await {
+            let server = match Server::start(build(port, scenario.cpus), port).await {
                 Ok(server) => server,
                 Err(error) => {
                     eprintln!("    could not start: {error}");
@@ -352,14 +373,21 @@ fn report(php: &Results, rust: &Results, meta: &Meta) -> String {
             continue;
         }
 
+        if let Some(cpus) = scenario.cpus {
+            out.push_str(&format!(
+                "Both servers are pinned to CPU {cpus} with `taskset`, and the Rust runtime is \
+                 given one worker thread to match. Reverb is single-threaded whatever the \
+                 machine has, so this is the comparison with that advantage removed: it is \
+                 the two runtimes doing the same work with the same resources.\n\n",
+            ));
+        }
+
         if scenario.memory_only {
-            out.push_str(
-                concat!(
-                    "Connections are opened and held, then memory is sampled. ",
-                    "Throughput and CPU are not reported: the run is too short for ",
-                    "`/proc`'s 10ms accounting to say anything meaningful about them.\n\n",
-                ),
-            );
+            out.push_str(concat!(
+                "Connections are opened and held, then memory is sampled. ",
+                "Throughput and CPU are not reported: the run is too short for ",
+                "`/proc`'s 10ms accounting to say anything meaningful about them.\n\n",
+            ));
         }
 
         out.push_str("| Metric | Laravel Reverb | reverb-rs | |\n|---|---|---|---|\n");
@@ -428,11 +456,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = Args::parse();
 
     if !args.reverb_php.join("vendor/autoload.php").is_file() {
-        return Err(format!(
-            "run composer install in {} first",
-            args.reverb_php.display()
-        )
-        .into());
+        return Err(format!("run composer install in {} first", args.reverb_php.display()).into());
     }
 
     if !Path::new("./target/release/reverb-rs").is_file() {
@@ -444,7 +468,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let php = run(
         "reverb",
         args.php_port,
-        move |port| reverb_php_command(&checkout, port),
+        move |port, cpus| reverb_php_command(&checkout, port, cpus),
         args.repeats,
     )
     .await;

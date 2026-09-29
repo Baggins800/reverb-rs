@@ -33,9 +33,7 @@ impl RestartWatch {
     pub fn file(cache_path: &Path, key: &str) -> Self {
         let digest = hex::encode(Sha1::digest(key.as_bytes()));
 
-        Self::File {
-            path: cache_path.join(&digest[0..2]).join(&digest[2..4]).join(&digest),
-        }
+        Self::File { path: cache_path.join(&digest[0..2]).join(&digest[2..4]).join(&digest) }
     }
 
     /// The Redis key for a Laravel cache key under the configured prefix.
@@ -64,7 +62,11 @@ impl RestartWatch {
                 let client = redis::Client::open(url.as_str()).ok()?;
                 let mut connection = client.get_multiplexed_async_connection().await.ok()?;
 
-                redis::cmd("GET").arg(key).query_async::<Option<String>>(&mut connection).await.ok()?
+                redis::cmd("GET")
+                    .arg(key)
+                    .query_async::<Option<String>>(&mut connection)
+                    .await
+                    .ok()?
             }
         }
     }

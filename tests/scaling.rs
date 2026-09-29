@@ -131,9 +131,8 @@ async fn merges_presence_rosters_across_the_cluster() {
     subscribe_with_data(&mut second, &second_id, "presence-test", Some(json!({ "user_id": 2 })))
         .await;
 
-    let response = two
-        .api("GET", &format!("/apps/{APP_ID}/channels/presence-test/users"), &[], None)
-        .await;
+    let response =
+        two.api("GET", &format!("/apps/{APP_ID}/channels/presence-test/users"), &[], None).await;
 
     let users: serde_json::Value =
         serde_json::from_str(&response.text().await.unwrap()).expect("json");

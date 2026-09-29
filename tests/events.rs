@@ -92,8 +92,7 @@ async fn relays_messages_in_both_directions() {
     // The acknowledgement and the subscription reply are both sends; the
     // subscribe frame is the one receive, recorded after it was handled.
     let sent: Vec<_> = events.iter().filter(|e| e.kind == EventKind::MessageSent).collect();
-    let received: Vec<_> =
-        events.iter().filter(|e| e.kind == EventKind::MessageReceived).collect();
+    let received: Vec<_> = events.iter().filter(|e| e.kind == EventKind::MessageReceived).collect();
 
     assert_eq!(sent.len(), 2, "connection_established and subscription_succeeded");
     assert_eq!(received.len(), 1);
@@ -208,8 +207,7 @@ mod wire_contract {
         )
         .await;
 
-        let (mut socket, id) =
-            server.connect_with_origin(Some("https://laravel.test")).await;
+        let (mut socket, id) = server.connect_with_origin(Some("https://laravel.test")).await;
         subscribe(&mut socket, &id, "test-channel").await;
 
         for event in drain(&mut rx) {
@@ -230,8 +228,7 @@ mod wire_contract {
             start_with_events(app, EventSet::of([EventKind::ConnectionPruned])).await;
 
         let (mut socket, id) = server.connect().await;
-        subscribe_with_data(&mut socket, &id, "presence-test", Some(json!({ "user_id": 5 })))
-            .await;
+        subscribe_with_data(&mut socket, &id, "presence-test", Some(json!({ "user_id": 5 }))).await;
 
         let state = Arc::new(server);
         reverb_rs::sweep(&state.server);

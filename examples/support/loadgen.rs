@@ -45,6 +45,12 @@ pub struct Scenario {
     pub connect_concurrency: Option<usize>,
     /// How many API publishes to keep in flight.
     pub publish_concurrency: usize,
+    /// Pin the server to these CPUs, as a `taskset -c` list.
+    ///
+    /// Reverb is single-threaded by design, so its wall-clock results reflect
+    /// having one core whatever the machine has. Pinning both servers to one
+    /// core removes that difference and compares the runtimes directly.
+    pub cpus: Option<&'static str>,
     /// Report only memory for this scenario.
     ///
     /// A scenario that delivers almost nothing finishes in milliseconds, and
@@ -69,8 +75,15 @@ impl Scenario {
             payload_bytes,
             connect_concurrency: None,
             publish_concurrency: 16,
+            cpus: None,
             memory_only: false,
         }
+    }
+
+    /// Run this scenario with the server pinned to one core.
+    pub fn on_one_core(mut self) -> Self {
+        self.cpus = Some("0");
+        self
     }
 
     /// A scenario that only reports memory.
@@ -171,8 +184,7 @@ pub async fn measure(
         let wave = batch.min(scenario.connections - opened);
 
         for _ in 0..wave {
-            let (target, scenario, ready) =
-                (target.clone(), scenario.clone(), ready_tx.clone());
+            let (target, scenario, ready) = (target.clone(), scenario.clone(), ready_tx.clone());
 
             subscribers.push(tokio::spawn(async move {
                 subscribe_and_collect(target, scenario, ready).await
@@ -269,9 +281,9 @@ pub async fn measure(
         rss_idle_mb: baseline_rss.map(mb),
         rss_connected_mb: connected_rss.map(mb),
         rss_peak_mb: peak_rss.map(mb),
-        rss_kb_per_connection: peak_rss.zip(baseline_rss).map(|(peak, base)| {
-            peak.saturating_sub(base) as f64 / scenario.connections as f64
-        }),
+        rss_kb_per_connection: peak_rss
+            .zip(baseline_rss)
+            .map(|(peak, base)| peak.saturating_sub(base) as f64 / scenario.connections as f64),
     })
 }
 
@@ -300,9 +312,8 @@ async fn subscribe_and_collect(
     let mut bytes = 0u64;
 
     while latencies.len() < scenario.events {
-        let frame = tokio::time::timeout(Duration::from_secs(120), next_text(&mut socket))
-            .await
-            .ok()??;
+        let frame =
+            tokio::time::timeout(Duration::from_secs(120), next_text(&mut socket)).await.ok()??;
 
         // Payload plus the unmasked server frame header.
         bytes += frame.len() as u64 + if frame.len() < 126 { 2 } else { 4 };
@@ -371,10 +382,7 @@ async fn trigger(
     let signature = sign(&target.secret, &format!("POST\n{path}\n{query}"));
 
     let response = http
-        .post(format!(
-            "http://{}{}?{}&auth_signature={}",
-            target.addr, path, query, signature
-        ))
+        .post(format!("http://{}{}?{}&auth_signature={}", target.addr, path, query, signature))
         .body(body)
         .send()
         .await?;

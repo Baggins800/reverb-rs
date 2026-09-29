@@ -85,11 +85,8 @@ pub fn local(server: &Server, app: &Arc<Application>, request: &MetricRequest) -
 
     match request.kind {
         MetricType::Connections => {
-            let ids: Vec<Value> = registry
-                .subscribed_connections()
-                .into_keys()
-                .map(Value::String)
-                .collect();
+            let ids: Vec<Value> =
+                registry.subscribed_connections().into_keys().map(Value::String).collect();
 
             Value::Array(ids)
         }
@@ -124,7 +121,10 @@ pub fn local(server: &Server, app: &Arc<Application>, request: &MetricRequest) -
             let mut out = Map::new();
 
             for name in names {
-                out.insert(name.clone(), Value::Object(channel_info(server, app, &name, requested)));
+                out.insert(
+                    name.clone(),
+                    Value::Object(channel_info(server, app, &name, requested)),
+                );
             }
 
             Value::Object(out)
@@ -146,7 +146,9 @@ pub fn local(server: &Server, app: &Arc<Application>, request: &MetricRequest) -
                 }
 
                 seen.push(key);
-                users.push(json!({ "id": member.data.get("user_id").cloned().unwrap_or(Value::Null) }));
+                users.push(
+                    json!({ "id": member.data.get("user_id").cloned().unwrap_or(Value::Null) }),
+                );
             }
 
             Value::Array(users)
@@ -160,9 +162,10 @@ pub fn local(server: &Server, app: &Arc<Application>, request: &MetricRequest) -
             .unwrap_or_else(|| json!({})),
 
         MetricType::PresenceConnections => {
-            let (Some(channel), Some(user_id)) =
-                (request.channel.as_deref().and_then(|c| registry.find(c)), request.user_id.as_deref())
-            else {
+            let (Some(channel), Some(user_id)) = (
+                request.channel.as_deref().and_then(|c| registry.find(c)),
+                request.user_id.as_deref(),
+            ) else {
                 return json!([]);
             };
 
@@ -179,7 +182,12 @@ pub fn local(server: &Server, app: &Arc<Application>, request: &MetricRequest) -
 
 /// Meta information for one channel, in Reverb's member order, omitting
 /// anything that was not requested or does not apply.
-fn channel_info(server: &Server, app: &Arc<Application>, name: &str, info: &str) -> Map<String, Value> {
+fn channel_info(
+    server: &Server,
+    app: &Arc<Application>,
+    name: &str,
+    info: &str,
+) -> Map<String, Value> {
     let requested: Vec<&str> = info.split(',').collect();
     let wants = |key: &str| requested.contains(&key);
 
@@ -276,7 +284,8 @@ pub fn merge(kind: MetricType, answers: Vec<Value>) -> Value {
             for answer in answers {
                 let Some(presence) = answer.get("presence") else { continue };
 
-                for id in presence.get("ids").and_then(Value::as_array).cloned().unwrap_or_default() {
+                for id in presence.get("ids").and_then(Value::as_array).cloned().unwrap_or_default()
+                {
                     if !ids.contains(&id) {
                         ids.push(id);
                     }

@@ -12,8 +12,7 @@ use support::*;
 async fn serves_the_health_check_unauthenticated() {
     let server = start().await;
 
-    let response =
-        reqwest::get(format!("http://{}/up", server.addr)).await.expect("health check");
+    let response = reqwest::get(format!("http://{}/up", server.addr)).await.expect("health check");
 
     assert_eq!(response.status(), 200);
     assert_eq!(response.text().await.unwrap(), r#"{"health":"OK"}"#);
@@ -131,10 +130,7 @@ async fn returns_per_event_info_for_a_batch() {
     let response =
         server.api("POST", &format!("/apps/{APP_ID}/batch_events"), &[], Some(&body)).await;
 
-    assert_eq!(
-        response.text().await.unwrap(),
-        r#"{"batch":[{"subscription_count":1},{}]}"#
-    );
+    assert_eq!(response.text().await.unwrap(), r#"{"batch":[{"subscription_count":1},{}]}"#);
 }
 
 #[tokio::test]
@@ -153,8 +149,9 @@ async fn returns_information_for_all_occupied_channels() {
     )
     .await;
 
-    let response =
-        server.api("GET", &format!("/apps/{APP_ID}/channels"), &[("info", "user_count")], None).await;
+    let response = server
+        .api("GET", &format!("/apps/{APP_ID}/channels"), &[("info", "user_count")], None)
+        .await;
 
     assert_eq!(response.status(), 200);
     // Channels are reported in name order, which Reverb leaves to insertion order.
@@ -173,12 +170,7 @@ async fn filters_channels_by_prefix() {
     subscribe(&mut one, &one_id, "other-channel").await;
 
     let response = server
-        .api(
-            "GET",
-            &format!("/apps/{APP_ID}/channels"),
-            &[("filter_by_prefix", "test-")],
-            None,
-        )
+        .api("GET", &format!("/apps/{APP_ID}/channels"), &[("filter_by_prefix", "test-")], None)
         .await;
 
     assert_eq!(response.text().await.unwrap(), r#"{"channels":{"test-channel-one":{}}}"#);
@@ -253,7 +245,8 @@ async fn reports_only_the_requested_attributes() {
     let response = server.api("GET", &path, &[("info", "cache")], None).await;
     assert_eq!(response.text().await.unwrap(), r#"{"occupied":true}"#);
 
-    let response = server.api("GET", &path, &[("info", "subscription_count,user_count")], None).await;
+    let response =
+        server.api("GET", &path, &[("info", "subscription_count,user_count")], None).await;
     assert_eq!(response.text().await.unwrap(), r#"{"occupied":true,"subscription_count":1}"#);
 }
 
@@ -264,8 +257,13 @@ async fn reports_presence_channel_attributes() {
     // Two connections for the same user count as one user.
     for _ in 0..2 {
         let (mut socket, id) = server.connect().await;
-        subscribe_with_data(&mut socket, &id, "presence-test-channel", Some(json!({ "user_id": 123 })))
-            .await;
+        subscribe_with_data(
+            &mut socket,
+            &id,
+            "presence-test-channel",
+            Some(json!({ "user_id": 123 })),
+        )
+        .await;
         std::mem::forget(socket);
     }
 
@@ -344,9 +342,8 @@ async fn rejects_listing_users_of_a_non_presence_channel() {
     let (mut socket, id) = server.connect().await;
     subscribe(&mut socket, &id, "test-channel").await;
 
-    let response = server
-        .api("GET", &format!("/apps/{APP_ID}/channels/test-channel/users"), &[], None)
-        .await;
+    let response =
+        server.api("GET", &format!("/apps/{APP_ID}/channels/test-channel/users"), &[], None).await;
 
     assert_eq!(response.status(), 400);
 }
@@ -371,12 +368,7 @@ async fn terminates_a_users_connections() {
         .await;
 
     let response = server
-        .api(
-            "POST",
-            &format!("/apps/{APP_ID}/users/42/terminate_connections"),
-            &[],
-            Some("{}"),
-        )
+        .api("POST", &format!("/apps/{APP_ID}/users/42/terminate_connections"), &[], Some("{}"))
         .await;
 
     assert_eq!(response.status(), 200);
@@ -421,8 +413,7 @@ async fn rejects_signatures_outside_the_timestamp_tolerance() {
     let path = format!("/apps/{APP_ID}/channels");
 
     for offset in [-3600, 3600] {
-        let response =
-            server.api_at("GET", &path, &[], None, unix_time() + offset).await;
+        let response = server.api_at("GET", &path, &[], None, unix_time() + offset).await;
 
         assert_eq!(response.status(), 401, "offset {offset} should be rejected");
     }
@@ -455,10 +446,8 @@ async fn rejects_a_tampered_body() {
     let query = format!(
         "auth_key={APP_KEY}&auth_timestamp={timestamp}&auth_version=1.0&body_md5={body_md5}"
     );
-    let signature = reverb_rs::server::sign(
-        APP_SECRET,
-        &format!("POST\n/apps/{APP_ID}/events\n{query}"),
-    );
+    let signature =
+        reverb_rs::server::sign(APP_SECRET, &format!("POST\n/apps/{APP_ID}/events\n{query}"));
 
     let response = reqwest::Client::new()
         .post(format!(

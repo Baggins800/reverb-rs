@@ -21,9 +21,9 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use reverb_rs::events::{EventKind, EventSet};
 use serde_json::{Value, json};
+use support::*;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
-use support::*;
 
 /// A running PHP relay, plus everything its listeners have reported.
 struct Relay {
@@ -163,8 +163,7 @@ async fn relays_every_event_to_laravel() {
     // Makes every connection immediately inactive, so two sweeps prune it.
     app.ping_interval = 0;
 
-    let server =
-        start_with_redis_relay(app, EventSet::of(EventKind::ALL), &redis, &channel).await;
+    let server = start_with_redis_relay(app, EventSet::of(EventKind::ALL), &redis, &channel).await;
 
     let (mut socket, id) = server.connect().await;
     subscribe_with_data(&mut socket, &id, "presence-relay", Some(json!({ "user_id": 77 }))).await;
@@ -206,9 +205,7 @@ async fn relays_every_event_to_laravel() {
     assert_eq!(pruned[0]["user_id"], 77, "presence data survives the round trip");
 
     relay
-        .wait_for("the emptied channel", |seen| {
-            seen.iter().any(|v| v["event"] == "ChannelRemoved")
-        })
+        .wait_for("the emptied channel", |seen| seen.iter().any(|v| v["event"] == "ChannelRemoved"))
         .await;
 
     assert_eq!(relay.of_kind("ChannelRemoved")[0]["channel"], "presence-relay");
@@ -235,10 +232,11 @@ async fn rebuilds_each_channel_as_its_reverb_class() {
         subscribe(&mut socket, &id, name).await;
     }
 
-    relay.wait_for("all four channels", |seen| {
-        seen.iter().filter(|v| v["event"] == "ChannelCreated").count() == 4
-    })
-    .await;
+    relay
+        .wait_for("all four channels", |seen| {
+            seen.iter().filter(|v| v["event"] == "ChannelCreated").count() == 4
+        })
+        .await;
 
     let classes: Vec<String> = relay
         .of_kind("ChannelCreated")
@@ -339,9 +337,7 @@ async fn ignores_events_for_an_unknown_application() {
     subscribe(&mut socket, &id, "after-orphan").await;
 
     relay
-        .wait_for("the valid event", |seen| {
-            seen.iter().any(|v| v["channel"] == "after-orphan")
-        })
+        .wait_for("the valid event", |seen| seen.iter().any(|v| v["channel"] == "after-orphan"))
         .await;
 
     assert!(

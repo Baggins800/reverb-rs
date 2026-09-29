@@ -258,10 +258,9 @@ async fn handle_envelope(raw: &str, server: &Arc<Server>, pubsub: &Arc<PubSub>) 
         }
 
         "metrics" => {
-            let (Some(key), Some(request)) = (
-                envelope.get("key").and_then(Value::as_str),
-                envelope.get("request").cloned(),
-            ) else {
+            let (Some(key), Some(request)) =
+                (envelope.get("key").and_then(Value::as_str), envelope.get("request").cloned())
+            else {
                 return Ok(());
             };
 
@@ -295,9 +294,9 @@ fn resolve_app(server: &Server, envelope: &Value) -> Option<Arc<Application>> {
 /// The shape a node returns when it knows nothing about the application.
 fn empty_answer(kind: MetricType) -> Value {
     match kind {
-        MetricType::Connections
-        | MetricType::ChannelUsers
-        | MetricType::PresenceConnections => json!([]),
+        MetricType::Connections | MetricType::ChannelUsers | MetricType::PresenceConnections => {
+            json!([])
+        }
         _ => json!({}),
     }
 }

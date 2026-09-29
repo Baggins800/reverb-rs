@@ -110,11 +110,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     drain(&mut two, "whisper echoed to the sender").await;
 
     section("client event from a non-member");
-    send(
-        &mut one,
-        json!({ "event": "client-typing", "channel": "private-nope", "data": {} }),
-    )
-    .await?;
+    send(&mut one, json!({ "event": "client-typing", "channel": "private-nope", "data": {} }))
+        .await?;
     drain(&mut one, "non-member whisper").await;
 
     section("ping");
@@ -130,24 +127,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     drain(&mut one, "malformed").await;
 
     section("unsubscribe");
-    send(
-        &mut one,
-        json!({ "event": "pusher:unsubscribe", "data": { "channel": "test-channel" } }),
-    )
-    .await?;
+    send(&mut one, json!({ "event": "pusher:unsubscribe", "data": { "channel": "test-channel" } }))
+        .await?;
     drain(&mut one, "unsubscribe").await;
 
     section("HTTP API");
     api(&args, "GET", "/up", &[], None).await;
     api(&args, "GET", &format!("/apps/{}/connections", args.app_id), &[], None).await;
-    api(
-        &args,
-        "GET",
-        &format!("/apps/{}/channels", args.app_id),
-        &[("info", "user_count")],
-        None,
-    )
-    .await;
+    api(&args, "GET", &format!("/apps/{}/channels", args.app_id), &[("info", "user_count")], None)
+        .await;
     api(
         &args,
         "GET",
@@ -180,14 +168,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,
     )
     .await;
-    api(
-        &args,
-        "GET",
-        &format!("/apps/{}/channels/test-channel/users", args.app_id),
-        &[],
-        None,
-    )
-    .await;
+    api(&args, "GET", &format!("/apps/{}/channels/test-channel/users", args.app_id), &[], None)
+        .await;
 
     section("HTTP API failures");
     api(&args, "GET", "/apps/999999/channels", &[], None).await;
@@ -388,11 +370,7 @@ async fn wrong_method(args: &Args, path: &str) {
 async fn oversized(args: &Args, path: &str) {
     let body = json!({ "name": "Big", "channel": "c", "data": "x".repeat(50_000) }).to_string();
 
-    match reqwest::Client::new()
-        .post(format!("http://{}{path}", args.addr))
-        .body(body)
-        .send()
-        .await
+    match reqwest::Client::new().post(format!("http://{}{path}", args.addr)).body(body).send().await
     {
         Ok(response) => {
             let status = response.status().as_u16();

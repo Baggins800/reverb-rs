@@ -30,9 +30,9 @@ php artisan reverb-rs:binary --build
 If `reverb-rs` is already on `PATH` — a system package, a container image — it is used as-is
 and nothing is installed.
 
-Without `--build` the command downloads a prebuilt release instead. **No releases have been
-published yet**, so that path currently fails; build from source or use the container until
-one exists.
+Without `--build` the command downloads a prebuilt release instead. Releases are built by
+`.github/workflows/release.yml` on a `v*` tag, so that path works once a tag has been pushed —
+until then, build from source or use the container.
 
 Prefer to build it yourself:
 
@@ -180,18 +180,32 @@ messages, median of three runs on 14 cores:
 
 | | Laravel Reverb | reverb-rs | |
 |---|---|---|---|
-| Messages delivered | 138,006 msg/s | 1,646,182 msg/s | **11.9× faster** |
-| Wire throughput | 194 Mbit/s | 2318 Mbit/s | **11.9×** |
-| CPU per message | 5.98 µs | 1.82 µs | **3.3× less** |
-| Latency p50 | 54.6 ms | 3.8 ms | **14.2× lower** |
-| Memory idle | 53.0 MB | 6.7 MB | **7.9× smaller** |
+| Messages delivered | 138,567 msg/s | 1,705,695 msg/s | **12.3× faster** |
+| Wire throughput | 195 Mbit/s | 2402 Mbit/s | **12.3×** |
+| CPU per message | 5.94 µs | 1.60 µs | **3.7× less** |
+| Latency p50 | 54.9 ms | 3.7 ms | **14.8× lower** |
+| Memory idle | 51.0 MB | 7.0 MB | **7.3× smaller** |
 | Memory per idle connection | 21.8 KB | 6.9 KB | **3.1× smaller** |
 
-Two of those deserve a word. **CPU per message** is the figure that survives a change of
-hardware: it is the work each server does to put one frame on one socket, and reverb-rs needs
-3.3× less of it. The 11.9× in wall-clock terms is that efficiency multiplied by being able to
-use more than one core, which Reverb by design cannot. **Wire throughput** is loopback, so read
-it as a ceiling the server does not impose rather than a rate a real NIC would carry.
+Most of that 12.3× is having more than one core to use, which Reverb by design cannot. So the
+benchmark also runs both servers pinned to a **single core** with `taskset`, which is the
+comparison with that advantage removed:
+
+| One core each | Laravel Reverb | reverb-rs | |
+|---|---|---|---|
+| Messages delivered | 152,826 msg/s | 1,084,578 msg/s | **7.1× faster** |
+| CPU per message | 5.24 µs | 0.64 µs | **8.2× less** |
+| Latency p99 | 61.0 ms | 97.8 ms | 1.6× worse |
+
+Seven times the throughput on one core is the runtime difference rather than the parallelism.
+Two things in there are worth not glossing over. `reverb-rs` is *more* efficient per message on
+one core than on fourteen (0.64 µs against 1.60 µs) — no cross-core cache traffic, and write
+batching coalesces harder when one thread is doing all the work. And its p99 latency on one core
+is **worse** than Reverb's: saturating a single worker thread with batched writes makes some
+connections wait their turn. Throughput and tail latency pull against each other there.
+
+**Wire throughput** is loopback, so read it as a ceiling the server does not impose rather than
+a rate a real NIC would carry.
 
 Reproduce it:
 
@@ -214,26 +228,26 @@ the server stays single-threaded either way.
 ## Running in a container
 
 ```bash
-docker build -t reverb-rs .
+docker pull ghcr.io/baggins800/reverb-rs
 
 docker run -d -p 8080:8080 \
   -e REVERB_APP_ID=... -e REVERB_APP_KEY=... -e REVERB_APP_SECRET=... \
-  reverb-rs
+  ghcr.io/baggins800/reverb-rs
 ```
 
-A multi-stage build on `rust:bookworm` producing a `distroless/cc` image — **31.9 MB**, no shell,
-running as `nonroot`. The binary is PID 1 and handles `SIGTERM` itself, so `docker stop` closes
-client connections cleanly before the process exits.
+**10.5 MB**, for `linux/amd64` and `linux/arm64`. The server is statically linked against musl
+and sits on `distroless/static`, so the image holds the binary, CA certificates and nothing
+else — no shell, no libc, no package manager. It runs as `nonroot`, and the binary is PID 1 and
+handles `SIGTERM` itself, so `docker stop` closes client connections cleanly before exiting.
 
-Since the image has no shell or HTTP client, the binary doubles as its own health probe:
+Since there is no shell or HTTP client in the image, the binary is its own health probe:
 
 ```bash
 reverb-rs --healthcheck      # exit 0 if the configured port answers /up
 ```
 
 which is what the image's `HEALTHCHECK` and the compose service use. `docker-compose.yml` brings
-up the server with Redis, and carries the switches for horizontal scaling and the Laravel event
-relay:
+the server up with Redis and carries the switches for horizontal scaling and the event relay:
 
 ```bash
 REVERB_APP_ID=... REVERB_APP_KEY=... REVERB_APP_SECRET=... docker compose up -d
@@ -241,6 +255,21 @@ REVERB_APP_ID=... REVERB_APP_KEY=... REVERB_APP_SECRET=... docker compose up -d
 
 Set `REVERB_SCALING_ENABLED=true` before scaling the service past one replica, or each replica
 will only serve its own connections.
+
+Build it yourself with `docker build -t reverb-rs .` — the same Dockerfile CI uses.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request: `cargo fmt`, `cargo clippy` with
+warnings denied, and the whole test suite against a real Redis and a real Laravel application,
+so the gated PHP suites actually run rather than skip. It also builds the image and checks it
+serves and shuts down cleanly.
+
+`.github/workflows/release.yml` runs on a `v*` tag. It builds the image for each architecture on
+its own native runner — a Rust build under QEMU takes the better part of an hour — pushes both
+by digest to GHCR and combines them into one multi-architecture tag with provenance and an SBOM.
+In parallel it builds the binaries for `x86_64`/`aarch64` Linux and macOS that
+`php artisan reverb-rs:binary` downloads, and attaches them to the GitHub release.
 
 ## Compatibility
 
@@ -471,6 +500,7 @@ own test suite.
 | `examples/benchmark.rs` | Starts both servers and writes `benchmark.md` |
 | `examples/bench.rs` | Load generator for a single server |
 | `Dockerfile`, `docker-compose.yml` | Container build and a deployment with Redis |
+| `.github/workflows/` | Tests on every push; images and binaries on a tag |
 | `src/config.rs` | `config/reverb.php`-compatible configuration |
 
 ## License

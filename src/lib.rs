@@ -40,19 +40,13 @@ pub fn router(server: Arc<Server>) -> Router {
         .route("/apps/{appId}/channels", get(http::channels))
         .route("/apps/{appId}/channels/{channel}", get(http::channel))
         .route("/apps/{appId}/channels/{channel}/users", get(http::channel_users))
-        .route(
-            "/apps/{appId}/users/{userId}/terminate_connections",
-            post(http::terminate_user),
-        )
+        .route("/apps/{appId}/users/{userId}/terminate_connections", post(http::terminate_user))
         .route("/apps/{appId}/counters", get(http::counters))
         .route("/up", get(http::health_check))
         .fallback(http::not_found)
         .method_not_allowed_fallback(http::method_not_allowed)
         .layer(DefaultBodyLimit::max(server.config.max_request_size))
-        .layer(axum::middleware::from_fn_with_state(
-            server.clone(),
-            http::limit_request_size,
-        ))
+        .layer(axum::middleware::from_fn_with_state(server.clone(), http::limit_request_size))
         .with_state(server);
 
     if prefix.is_empty() { routes } else { Router::new().nest(&prefix, routes) }

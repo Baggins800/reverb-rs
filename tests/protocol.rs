@@ -176,9 +176,7 @@ async fn replays_the_last_payload_when_joining_a_cache_channel() {
     subscribe(&mut first, &first_id, "cache-test-channel").await;
     next_text(&mut first).await; // cache_miss
 
-    server
-        .trigger("cache-test-channel", "App\\Events\\TestEvent", json!({ "foo": "bar" }))
-        .await;
+    server.trigger("cache-test-channel", "App\\Events\\TestEvent", json!({ "foo": "bar" })).await;
 
     next_text(&mut first).await; // the broadcast itself
 

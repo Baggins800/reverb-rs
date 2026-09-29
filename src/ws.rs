@@ -26,8 +26,7 @@ pub async fn handler(
     State(server): State<Arc<Server>>,
     headers: HeaderMap,
 ) -> Response {
-    let origin =
-        headers.get("origin").and_then(|value| value.to_str().ok()).map(str::to_string);
+    let origin = headers.get("origin").and_then(|value| value.to_str().ok()).map(str::to_string);
 
     let Some(app) = server.app_by_key(&app_key) else {
         // Reverb completes the handshake before reporting an unknown key, so

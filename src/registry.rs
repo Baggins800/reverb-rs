@@ -26,12 +26,7 @@ pub struct AppRegistry {
 
 impl AppRegistry {
     pub fn new(app_id: String, telemetry: Arc<Telemetry>) -> Self {
-        Self {
-            app_id,
-            sockets: DashMap::new(),
-            channels: DashMap::new(),
-            telemetry,
-        }
+        Self { app_id, sockets: DashMap::new(), channels: DashMap::new(), telemetry }
     }
 
     pub fn add_socket(&self, conn: Arc<Conn>) {

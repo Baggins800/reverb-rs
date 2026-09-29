@@ -27,55 +27,55 @@ plus WebSocket frame headers, not TCP/IP overhead.
 
 | Metric | Laravel Reverb | reverb-rs | |
 |---|---|---|---|
-| Messages delivered | 138006 msg/s | 1646182 msg/s | **11.9×** |
-| Wire throughput | 194.3 Mbit/s | 2317.8 Mbit/s | **11.9×** |
-| Wire throughput (KB/s) | 23720 KB/s | 282938 KB/s | **11.9×** |
-| HTTP publish rate | 276 req/s | 3320 req/s | **12.0×** |
-| Wall time for the run | 3.62 s | 0.30 s | **11.9×** |
-| Server CPU used | 2.99 s | 0.91 s | **3.3×** |
-| CPU per message | 5.98 µs | 1.82 µs | **3.3×** |
-| Latency p50 | 54.6 ms | 3.8 ms | **14.2×** |
-| Latency p99 | 79.3 ms | 11.3 ms | **7.0×** |
-| Memory idle | 53.0 MB | 6.7 MB | **7.9×** |
-| Memory with subscribers | 65.5 MB | 10.3 MB | **6.4×** |
-| Memory peak | 67.6 MB | 13.3 MB | **5.1×** |
-| Memory per connection | 29.7 KB | 13.8 KB | **2.2×** |
+| Messages delivered | 138567 msg/s | 1705695 msg/s | **12.3×** |
+| Wire throughput | 195.1 Mbit/s | 2401.6 Mbit/s | **12.3×** |
+| Wire throughput (KB/s) | 23816 KB/s | 293166 KB/s | **12.3×** |
+| HTTP publish rate | 277 req/s | 3426 req/s | **12.3×** |
+| Wall time for the run | 3.61 s | 0.29 s | **12.3×** |
+| Server CPU used | 2.97 s | 0.80 s | **3.7×** |
+| CPU per message | 5.94 µs | 1.60 µs | **3.7×** |
+| Latency p50 | 54.9 ms | 3.7 ms | **14.8×** |
+| Latency p99 | 76.4 ms | 11.6 ms | **6.6×** |
+| Memory idle | 51.0 MB | 7.0 MB | **7.3×** |
+| Memory with subscribers | 63.5 MB | 10.6 MB | **6.0×** |
+| Memory peak | 67.5 MB | 13.8 MB | **4.9×** |
+| Memory per connection | 33.9 KB | 14.0 KB | **2.4×** |
 
 ## 500 subscribers, 300 events, 4 KB payload
 
 | Metric | Laravel Reverb | reverb-rs | |
 |---|---|---|---|
-| Messages delivered | 110217 msg/s | 630426 msg/s | **5.7×** |
-| Wire throughput | 3678.6 Mbit/s | 21041.1 Mbit/s | **5.7×** |
-| Wire throughput (KB/s) | 449047 KB/s | 2568493 KB/s | **5.7×** |
-| HTTP publish rate | 221 req/s | 1281 req/s | **5.8×** |
+| Messages delivered | 110502 msg/s | 634693 msg/s | **5.7×** |
+| Wire throughput | 3688.1 Mbit/s | 21183.5 Mbit/s | **5.7×** |
+| Wire throughput (KB/s) | 450207 KB/s | 2585878 KB/s | **5.7×** |
+| HTTP publish rate | 221 req/s | 1272 req/s | **5.8×** |
 | Wall time for the run | 1.36 s | 0.24 s | **5.7×** |
-| Server CPU used | 1.17 s | 0.94 s | **1.2×** |
-| CPU per message | 7.80 µs | 6.27 µs | **1.2×** |
-| Latency p50 | 66.3 ms | 12.0 ms | **5.5×** |
-| Latency p99 | 90.5 ms | 35.3 ms | **2.6×** |
-| Memory idle | 52.9 MB | 6.6 MB | **8.0×** |
-| Memory with subscribers | 65.3 MB | 10.2 MB | **6.4×** |
-| Memory peak | 94.4 MB | 13.7 MB | **6.9×** |
-| Memory per connection | 85.1 KB | 14.6 KB | **5.8×** |
+| Server CPU used | 1.17 s | 0.90 s | **1.3×** |
+| CPU per message | 7.80 µs | 6.00 µs | **1.3×** |
+| Latency p50 | 67.6 ms | 11.9 ms | **5.7×** |
+| Latency p99 | 87.3 ms | 36.9 ms | **2.4×** |
+| Memory idle | 51.0 MB | 7.0 MB | **7.3×** |
+| Memory with subscribers | 63.5 MB | 10.8 MB | **5.9×** |
+| Memory peak | 89.3 MB | 14.5 MB | **6.1×** |
+| Memory per connection | 78.3 KB | 15.5 KB | **5.1×** |
 
 ## 800 subscribers, 500 events, 256 B payload
 
 | Metric | Laravel Reverb | reverb-rs | |
 |---|---|---|---|
-| Messages delivered | 138208 msg/s | 1523936 msg/s | **11.0×** |
-| Wire throughput | 370.4 Mbit/s | 4084.1 Mbit/s | **11.0×** |
-| Wire throughput (KB/s) | 45214 KB/s | 498553 KB/s | **11.0×** |
-| HTTP publish rate | 173 req/s | 1953 req/s | **11.3×** |
-| Wall time for the run | 2.89 s | 0.26 s | **11.0×** |
-| Server CPU used | 2.38 s | 0.85 s | **2.8×** |
-| CPU per message | 5.95 µs | 2.12 µs | **2.8×** |
-| Latency p50 | 86.9 ms | 7.6 ms | **11.4×** |
-| Latency p99 | 116.9 ms | 20.0 ms | **5.8×** |
-| Memory idle | 53.0 MB | 6.7 MB | **7.9×** |
-| Memory with subscribers | 69.2 MB | 11.9 MB | **5.8×** |
-| Memory peak | 74.3 MB | 16.2 MB | **4.6×** |
-| Memory per connection | 27.3 KB | 12.2 KB | **2.2×** |
+| Messages delivered | 141564 msg/s | 1541091 msg/s | **10.9×** |
+| Wire throughput | 379.4 Mbit/s | 4130.1 Mbit/s | **10.9×** |
+| Wire throughput (KB/s) | 46313 KB/s | 504166 KB/s | **10.9×** |
+| HTTP publish rate | 177 req/s | 1966 req/s | **11.1×** |
+| Wall time for the run | 2.83 s | 0.26 s | **10.9×** |
+| Server CPU used | 2.30 s | 0.87 s | **2.6×** |
+| CPU per message | 5.75 µs | 2.17 µs | **2.6×** |
+| Latency p50 | 86.7 ms | 7.2 ms | **12.0×** |
+| Latency p99 | 112.2 ms | 20.0 ms | **5.6×** |
+| Memory idle | 51.0 MB | 7.0 MB | **7.3×** |
+| Memory with subscribers | 67.5 MB | 12.3 MB | **5.5×** |
+| Memory peak | 73.6 MB | 16.3 MB | **4.5×** |
+| Memory per connection | 28.9 KB | 11.9 KB | **2.4×** |
 
 ## 800 idle subscribers (memory only)
 
@@ -83,10 +83,30 @@ Connections are opened and held, then memory is sampled. Throughput and CPU are 
 
 | Metric | Laravel Reverb | reverb-rs | |
 |---|---|---|---|
-| Memory idle | 53.1 MB | 6.8 MB | **7.8×** |
-| Memory with subscribers | 69.4 MB | 11.8 MB | **5.9×** |
-| Memory peak | 70.1 MB | 12.1 MB | **5.8×** |
-| Memory per connection | 21.8 KB | 6.9 KB | **3.1×** |
+| Memory idle | 50.9 MB | 7.0 MB | **7.3×** |
+| Memory with subscribers | 67.5 MB | 12.3 MB | **5.5×** |
+| Memory peak | 69.5 MB | 12.5 MB | **5.6×** |
+| Memory per connection | 23.8 KB | 7.1 KB | **3.4×** |
+
+## 500 subscribers, 500 events, 100 B payload — one core each
+
+Both servers are pinned to CPU 0 with `taskset`, and the Rust runtime is given one worker thread to match. Reverb is single-threaded whatever the machine has, so this is the comparison with that advantage removed: it is the two runtimes doing the same work with the same resources.
+
+| Metric | Laravel Reverb | reverb-rs | |
+|---|---|---|---|
+| Messages delivered | 152826 msg/s | 1084578 msg/s | **7.1×** |
+| Wire throughput | 209.1 Mbit/s | 1483.7 Mbit/s | **7.1×** |
+| Wire throughput (KB/s) | 25521 KB/s | 181116 KB/s | **7.1×** |
+| HTTP publish rate | 306 req/s | 2265 req/s | **7.4×** |
+| Wall time for the run | 1.64 s | 0.23 s | **7.1×** |
+| Server CPU used | 1.31 s | 0.16 s | **8.2×** |
+| CPU per message | 5.24 µs | 0.64 µs | **8.2×** |
+| Latency p50 | 49.2 ms | 17.3 ms | **2.8×** |
+| Latency p99 | 61.0 ms | 97.8 ms | 1.6× worse |
+| Memory idle | 51.0 MB | 6.7 MB | **7.6×** |
+| Memory with subscribers | 63.5 MB | 10.3 MB | **6.2×** |
+| Memory peak | 69.5 MB | 14.9 MB | **4.7×** |
+| Memory per connection | 38.0 KB | 16.9 KB | **2.2×** |
 
 ## Reading these numbers
 

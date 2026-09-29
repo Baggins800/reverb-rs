@@ -42,14 +42,7 @@ impl Server {
         // same telemetry handle the connections use.
         let registry = Registry::new(telemetry.clone());
 
-        Self {
-            config,
-            registry,
-            telemetry,
-            by_key,
-            by_id,
-            pubsub: parking_lot::RwLock::new(None),
-        }
+        Self { config, registry, telemetry, by_key, by_id, pubsub: parking_lot::RwLock::new(None) }
     }
 
     pub fn app_by_key(&self, key: &str) -> Option<Arc<Application>> {
@@ -379,9 +372,8 @@ impl Server {
         }
 
         // `Str::after($auth, ':')` yields the whole string when there is no colon.
-        let provided = auth
-            .map(|auth| auth.split_once(':').map(|(_, sig)| sig).unwrap_or(auth))
-            .unwrap_or("");
+        let provided =
+            auth.map(|auth| auth.split_once(':').map(|(_, sig)| sig).unwrap_or(auth)).unwrap_or("");
 
         verify_signature(&conn.app.secret, &signed, provided)
             .then_some(())
@@ -396,8 +388,10 @@ impl Server {
         name: &str,
         event: &Map<String, Value>,
     ) -> Result<(), PusherError> {
-        let channel_name =
-            event.get("channel").and_then(Value::as_str).ok_or(PusherError::InvalidMessageFormat)?;
+        let channel_name = event
+            .get("channel")
+            .and_then(Value::as_str)
+            .ok_or(PusherError::InvalidMessageFormat)?;
 
         match event.get("data") {
             Some(Value::Object(_) | Value::Array(_) | Value::Null) | None => {}
@@ -453,7 +447,12 @@ impl Server {
     // -- Fan-out --------------------------------------------------------------
 
     /// Publish a payload to its channels, across the cluster when scaling is on.
-    pub fn dispatch(&self, app: &Arc<Application>, payload: Map<String, Value>, except: Option<&str>) {
+    pub fn dispatch(
+        &self,
+        app: &Arc<Application>,
+        payload: Map<String, Value>,
+        except: Option<&str>,
+    ) {
         match self.pubsub() {
             Some(pubsub) => pubsub.publish_message(app, payload, except),
             None => self.dispatch_locally(app, &payload, except),

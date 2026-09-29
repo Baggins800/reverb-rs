@@ -15,8 +15,6 @@ use std::time::Duration;
 use reverb_rs::restart::{RESTART_KEY, RestartWatch};
 use tokio::process::Command;
 
-
-
 fn php_app() -> Option<String> {
     let app = std::env::var("REVERB_TEST_PHP_APP").ok()?;
 
@@ -53,8 +51,11 @@ async fn export(app: &str, cache_path: &std::path::Path, to: &std::path::Path) {
 
 /// A temporary directory unique to one test.
 fn scratch(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir()
-        .join(format!("reverb-rs-config-{name}-{}-{}", std::process::id(), unix_time()));
+    let dir = std::env::temp_dir().join(format!(
+        "reverb-rs-config-{name}-{}-{}",
+        std::process::id(),
+        unix_time()
+    ));
 
     std::fs::create_dir_all(&dir).expect("create scratch dir");
 
@@ -95,8 +96,7 @@ async fn serves_applications_the_environment_could_not_express() {
     // different activity timeout.
     let mut socket = server.open("secondary-key", None).await;
     let frame = support::next_json(&mut socket).await;
-    let data: serde_json::Value =
-        serde_json::from_str(frame["data"].as_str().unwrap()).unwrap();
+    let data: serde_json::Value = serde_json::from_str(frame["data"].as_str().unwrap()).unwrap();
 
     assert_eq!(data["activity_timeout"], 45);
 
@@ -222,11 +222,10 @@ async fn the_artisan_start_command_runs_the_server() {
     let health = reqwest::get(format!("http://127.0.0.1:{port}/up")).await.expect("health");
     assert_eq!(health.text().await.unwrap(), r#"{"health":"OK"}"#);
 
-    let (socket, _) = tokio_tungstenite::connect_async(format!(
-        "ws://127.0.0.1:{port}/app/secondary-key"
-    ))
-    .await
-    .expect("connect with an application only the Laravel config knows about");
+    let (socket, _) =
+        tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/app/secondary-key"))
+            .await
+            .expect("connect with an application only the Laravel config knows about");
 
     drop(socket);
 

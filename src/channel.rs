@@ -115,9 +115,7 @@ impl Channel {
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
 
-        self.members
-            .write()
-            .insert(conn.id.clone(), Member { conn, data, subscribed_at });
+        self.members.write().insert(conn.id.clone(), Member { conn, data, subscribed_at });
     }
 
     /// Remove a subscriber, returning its membership if it had one.

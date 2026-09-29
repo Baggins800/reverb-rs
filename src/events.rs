@@ -191,11 +191,7 @@ impl Telemetry {
     }
 
     /// As [`with_relay`], relaying only `sample_rate` of the message events.
-    pub fn sampled(
-        forward: EventSet,
-        relay: mpsc::Sender<RelayedEvent>,
-        sample_rate: f64,
-    ) -> Self {
+    pub fn sampled(forward: EventSet, relay: mpsc::Sender<RelayedEvent>, sample_rate: f64) -> Self {
         Self {
             counters: DashMap::new(),
             relay: Some(relay),
@@ -345,8 +341,7 @@ mod tests {
     #[test]
     fn does_not_relay_events_that_are_not_forwarded() {
         let (tx, mut rx) = mpsc::channel(8);
-        let telemetry =
-            Telemetry::with_relay(EventSet::of([EventKind::ChannelCreated]), tx);
+        let telemetry = Telemetry::with_relay(EventSet::of([EventKind::ChannelCreated]), tx);
 
         telemetry.emit_channel(EventKind::ChannelCreated, "app", "test-channel");
         telemetry.emit_channel(EventKind::ChannelRemoved, "app", "test-channel");

@@ -253,8 +253,7 @@ impl TestServer {
 
         signed.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let query =
-            signed.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&");
+        let query = signed.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&");
 
         let signature = sign(APP_SECRET, &format!("{method}\n{path}\n{query}"));
 

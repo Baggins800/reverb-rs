@@ -368,8 +368,10 @@ impl ServerConfig {
         }
 
         if config.apps.is_empty() {
-            bail!("no applications configured; set REVERB_APP_KEY and friends, or point \
-                   REVERB_CONFIG_FILE at the output of `php artisan reverb-rs:config`");
+            bail!(
+                "no applications configured; set REVERB_APP_KEY and friends, or point \
+                   REVERB_CONFIG_FILE at the output of `php artisan reverb-rs:config`"
+            );
         }
 
         Ok(config)
@@ -539,7 +541,9 @@ impl ServerConfig {
             ping_interval: env_parse("REVERB_APP_PING_INTERVAL", 60),
             activity_timeout: env_parse("REVERB_APP_ACTIVITY_TIMEOUT", 30),
             allowed_origins: env("REVERB_APP_ALLOWED_ORIGINS")
-                .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                .map(|v| {
+                    v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+                })
                 .unwrap_or_else(|| vec!["*".to_string()]),
             max_message_size: env_parse("REVERB_APP_MAX_MESSAGE_SIZE", 10_000),
             max_connections: env("REVERB_APP_MAX_CONNECTIONS").and_then(|v| v.parse().ok()),
@@ -575,31 +579,31 @@ impl ServerConfig {
 fn application_from_file(e: AppFileEntry) -> Arc<Application> {
     {
         {
-                let rl = e.rate_limiting;
-                Arc::new(Application {
-                    id: e.app_id,
-                    key: e.key,
-                    secret: e.secret,
-                    ping_interval: e.ping_interval.unwrap_or(60),
-                    activity_timeout: e.activity_timeout.unwrap_or(30),
-                    allowed_origins: e.allowed_origins.unwrap_or_else(|| vec!["*".into()]),
-                    max_message_size: e.max_message_size.unwrap_or(10_000),
-                    max_connections: e.max_connections,
-                    // Reverb's config provider defaults this to "all" when the
-                    // key is absent from the app definition.
-                    accept_client_events_from: ClientEvents::parse(
-                        e.accept_client_events_from.as_deref().unwrap_or("all"),
-                    ),
-                    rate_limiting: match rl {
-                        Some(rl) => RateLimiting {
-                            enabled: rl.enabled,
-                            max_attempts: rl.max_attempts.unwrap_or(60),
-                            decay_seconds: rl.decay_seconds.unwrap_or(60),
-                            terminate_on_limit: rl.terminate_on_limit.unwrap_or(false),
-                        },
-                        None => RateLimiting::default(),
+            let rl = e.rate_limiting;
+            Arc::new(Application {
+                id: e.app_id,
+                key: e.key,
+                secret: e.secret,
+                ping_interval: e.ping_interval.unwrap_or(60),
+                activity_timeout: e.activity_timeout.unwrap_or(30),
+                allowed_origins: e.allowed_origins.unwrap_or_else(|| vec!["*".into()]),
+                max_message_size: e.max_message_size.unwrap_or(10_000),
+                max_connections: e.max_connections,
+                // Reverb's config provider defaults this to "all" when the
+                // key is absent from the app definition.
+                accept_client_events_from: ClientEvents::parse(
+                    e.accept_client_events_from.as_deref().unwrap_or("all"),
+                ),
+                rate_limiting: match rl {
+                    Some(rl) => RateLimiting {
+                        enabled: rl.enabled,
+                        max_attempts: rl.max_attempts.unwrap_or(60),
+                        decay_seconds: rl.decay_seconds.unwrap_or(60),
+                        terminate_on_limit: rl.terminate_on_limit.unwrap_or(false),
                     },
-                })
+                    None => RateLimiting::default(),
+                },
+            })
         }
     }
 }

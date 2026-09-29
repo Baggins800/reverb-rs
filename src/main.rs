@@ -5,15 +5,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use axum_server::Handle;
 use axum_server::accept::NoDelayAcceptor;
 use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
-use axum_server::Handle;
 use clap::Parser;
-use tokio::net::{TcpSocket, TcpStream};
 use reverb_rs::config::ServerConfig;
 use reverb_rs::events::Telemetry;
 use reverb_rs::pubsub::PubSub;
 use reverb_rs::server::Server;
+use tokio::net::{TcpSocket, TcpStream};
 use tracing_subscriber::EnvFilter;
 
 /// How long in-flight requests get to finish once a shutdown signal arrives.
@@ -148,10 +148,9 @@ async fn main() -> Result<()> {
     let server = Arc::new(Server::with_telemetry(config, telemetry));
 
     if scaling.enabled {
-        let pubsub =
-            PubSub::connect(&scaling.redis_url, scaling.channel.clone(), server.clone())
-                .await
-                .context("failed to connect to Redis for horizontal scaling")?;
+        let pubsub = PubSub::connect(&scaling.redis_url, scaling.channel.clone(), server.clone())
+            .await
+            .context("failed to connect to Redis for horizontal scaling")?;
 
         server.attach_pubsub(pubsub);
 
@@ -238,8 +237,7 @@ async fn healthcheck(addr: SocketAddr, path: &str, secure: bool) -> Result<()> {
         return Ok(());
     }
 
-    let request =
-        format!("GET {path}/up HTTP/1.1\r\nHost: {target}\r\nConnection: close\r\n\r\n");
+    let request = format!("GET {path}/up HTTP/1.1\r\nHost: {target}\r\nConnection: close\r\n\r\n");
 
     stream.write_all(request.as_bytes()).await.context("health check could not send")?;
 

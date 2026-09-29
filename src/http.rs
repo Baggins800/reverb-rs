@@ -159,8 +159,7 @@ fn verify(
 
     let query = parse_query(raw_query);
 
-    let invalid =
-        || ApiError::new(StatusCode::UNAUTHORIZED, "Authentication signature invalid.");
+    let invalid = || ApiError::new(StatusCode::UNAUTHORIZED, "Authentication signature invalid.");
 
     // Everything but the signature itself, the app identifiers and a
     // client-supplied body hash participates in the signature.
@@ -179,19 +178,14 @@ fn verify(
         params.insert("body_md5".into(), hex::encode(Md5::digest(body)));
     }
 
-    let encoded = params
-        .iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect::<Vec<_>>()
-        .join("&");
+    let encoded =
+        params.iter().map(|(key, value)| format!("{key}={value}")).collect::<Vec<_>>().join("&");
 
     let path = strip_prefix(uri_path, &server.config.path);
     let signed = format!("{}\n{}\n{}", method.as_str(), path, encoded);
 
-    let provided = query
-        .get("auth_signature")
-        .and_then(|values| values.first())
-        .ok_or_else(invalid)?;
+    let provided =
+        query.get("auth_signature").and_then(|values| values.first()).ok_or_else(invalid)?;
 
     if !verify_signature(&app.secret, &signed, provided) {
         return Err(invalid());
@@ -327,11 +321,7 @@ pub async fn events(
 
     server.dispatch(
         &app,
-        payload_map([
-            ("event", json!(name)),
-            ("channels", json!(channels)),
-            ("data", json!(data)),
-        ]),
+        payload_map([("event", json!(name)), ("channels", json!(channels)), ("data", json!(data))]),
         socket_id,
     );
 
@@ -422,8 +412,7 @@ pub async fn connections(
     let request = verify(&server, &app_id, &method, uri.path(), uri.query().unwrap_or(""), &[])?;
     let app = request.app.clone();
 
-    let result =
-        gather(&server, &app, MetricRequest::new(MetricType::Connections, &app.id)).await;
+    let result = gather(&server, &app, MetricRequest::new(MetricType::Connections, &app.id)).await;
 
     ok(json!({ "connections": result.as_array().map_or(0, Vec::len) }))
 }
