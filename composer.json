@@ -1,0 +1,48 @@
+{
+    "name": "baggins800/reverb-rs",
+    "description": "Laravel integration for reverb-rs, a drop-in Rust replacement for the Laravel Reverb WebSocket server.",
+    "keywords": [
+        "laravel",
+        "reverb",
+        "websockets",
+        "broadcasting",
+        "pusher",
+        "rust"
+    ],
+    "homepage": "https://github.com/Baggins800/reverb-rs",
+    "license": "MIT",
+    "type": "library",
+    "authors": [
+        {
+            "name": "Ruan Luies"
+        }
+    ],
+    "require": {
+        "php": "^8.2",
+        "illuminate/console": "^10.47|^11.0|^12.0|^13.0",
+        "illuminate/contracts": "^10.47|^11.0|^12.0|^13.0",
+        "illuminate/redis": "^10.47|^11.0|^12.0|^13.0",
+        "illuminate/support": "^10.47|^11.0|^12.0|^13.0",
+        "laravel/reverb": "^1.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "ReverbRs\\": "laravel/src/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "ReverbRs\\ReverbRsServiceProvider"
+            ]
+        }
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "suggest": {
+        "laravel/pulse": "Needed only for ReverbRs\\Pulse\\Recorders\\Messages, when sampling events in the server."
+    }
+}

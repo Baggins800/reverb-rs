@@ -1,0 +1,12 @@
+# Trim the Composer dist archive. The Rust sources stay, so the package can
+# build the server itself; everything only needed to develop or test it goes.
+/.dockerignore      export-ignore
+/.env.example       export-ignore
+/.github            export-ignore
+/Dockerfile         export-ignore
+/bench              export-ignore
+/benchmark.md       export-ignore
+/docker-compose.yml export-ignore
+/examples           export-ignore
+/tests              export-ignore
+/laravel/tests      export-ignore

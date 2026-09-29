@@ -13,10 +13,22 @@ cards and its broadcaster; you just stop running `php artisan reverb:start`.
 ## Install
 
 ```bash
-composer require reverb-rs/laravel
+composer require baggins800/reverb-rs
+php artisan reverb-rs:binary --build     # or omit --build to download a release
 ```
 
-Turn the relay on in the server:
+## Commands
+
+| | |
+|---|---|
+| `reverb-rs:start` | Start the server with this application's configuration. A drop-in for `reverb:start`. |
+| `reverb-rs:binary` | Install the server binary — built from source with `--build`, downloaded otherwise. |
+| `reverb-rs:config` | Print what `config/reverb.php` resolves to, as the server reads it. |
+| `reverb-rs:relay` | Re-dispatch the server's events onto this application's event bus. |
+
+## Relaying events
+
+Turn the relay on:
 
 ```dotenv
 REVERB_EVENTS_ENABLED=true

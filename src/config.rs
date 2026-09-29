@@ -11,6 +11,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::restart::{RESTART_KEY, RestartWatch};
+
 /// Who the application accepts `client-*` events from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientEvents {
@@ -202,6 +204,8 @@ pub struct ServerConfig {
     pub scaling: ScalingConfig,
     pub events: EventsConfig,
     pub apps: Vec<Arc<Application>>,
+    /// Where to watch for `php artisan reverb:restart`.
+    pub restart: RestartWatch,
     /// Per-connection outbound queue depth. A client that falls this far behind
     /// is disconnected rather than allowed to consume unbounded memory.
     pub send_queue_depth: usize,
@@ -249,6 +253,72 @@ fn env_bool(key: &str, default: bool) -> bool {
     }
 }
 
+/// A configuration exported from a Laravel application by
+/// `php artisan reverb-rs:config`.
+///
+/// Everything `config/reverb.php` resolves to — including values a plain
+/// `.env` cannot express, such as several applications or a custom
+/// application provider's output — arrives through this.
+#[derive(Debug, Deserialize)]
+struct ConfigFile {
+    #[serde(default)]
+    server: Option<ServerSection>,
+    #[serde(default)]
+    scaling: Option<ScalingSection>,
+    #[serde(default)]
+    restart: Option<RestartSection>,
+    apps: Vec<AppFileEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServerSection {
+    #[serde(default)]
+    host: Option<String>,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    hostname: Option<String>,
+    #[serde(default)]
+    max_request_size: Option<usize>,
+    /// The `options.tls` block, using PHP's stream context names.
+    #[serde(default)]
+    tls: Option<TlsSection>,
+}
+
+/// Reverb's TLS options, named as PHP's stream context names them.
+#[derive(Debug, Deserialize)]
+struct TlsSection {
+    #[serde(default)]
+    local_cert: Option<String>,
+    #[serde(default)]
+    local_pk: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScalingSection {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    channel: Option<String>,
+    #[serde(default)]
+    redis_url: Option<String>,
+}
+
+/// Where `php artisan reverb:restart` leaves its signal.
+#[derive(Debug, Deserialize)]
+struct RestartSection {
+    /// `file`, `redis`, or anything else to disable watching.
+    driver: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    prefix: Option<String>,
+    #[serde(default)]
+    redis_url: Option<String>,
+}
+
 /// The JSON shape of one entry in `reverb.apps.apps`, for `REVERB_APPS_FILE`.
 #[derive(Debug, Deserialize)]
 struct AppFileEntry {
@@ -284,12 +354,122 @@ struct RateLimitingFile {
 }
 
 impl ServerConfig {
+    /// Build the configuration, from an exported Laravel config when one is
+    /// pointed at and from the environment otherwise.
+    pub fn load() -> Result<Self> {
+        let exported = env("REVERB_CONFIG_FILE");
+
+        // An exported config supplies the applications, so the environment is
+        // not required to as well.
+        let mut config = Self::build(exported.is_none())?;
+
+        if let Some(path) = exported {
+            config.apply_file(&path)?;
+        }
+
+        if config.apps.is_empty() {
+            bail!("no applications configured; set REVERB_APP_KEY and friends, or point \
+                   REVERB_CONFIG_FILE at the output of `php artisan reverb-rs:config`");
+        }
+
+        Ok(config)
+    }
+
+    /// Overlay an exported Laravel configuration.
+    ///
+    /// The file is authoritative for everything it sets, since it is what
+    /// `config/reverb.php` actually resolved to; anything it omits keeps the
+    /// value already read from the environment.
+    fn apply_file(&mut self, path: &str) -> Result<()> {
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read REVERB_CONFIG_FILE [{path}]"))?;
+
+        let file: ConfigFile = serde_json::from_str(&raw)
+            .with_context(|| format!("failed to parse REVERB_CONFIG_FILE [{path}]"))?;
+
+        if file.apps.is_empty() {
+            bail!("REVERB_CONFIG_FILE [{path}] defines no applications");
+        }
+
+        self.apps = file.apps.into_iter().map(application_from_file).collect();
+
+        if let Some(server) = file.server {
+            if let Some(host) = server.host {
+                self.host = host;
+            }
+            if let Some(port) = server.port {
+                self.port = port;
+            }
+            if let Some(path) = server.path {
+                self.path = normalize_path(&path);
+            }
+            if server.hostname.is_some() {
+                self.hostname = server.hostname;
+            }
+            if let Some(size) = server.max_request_size {
+                self.max_request_size = size;
+            }
+
+            // Reverb's `options.tls` block, if it names a certificate.
+            if let Some(tls) = server.tls
+                && let (Some(cert), Some(key)) = (tls.local_cert, tls.local_pk)
+            {
+                self.tls = Some(TlsConfig { cert: cert.into(), key: key.into() });
+            }
+        }
+
+        if let Some(scaling) = file.scaling {
+            if let Some(enabled) = scaling.enabled {
+                self.scaling.enabled = enabled;
+            }
+            if let Some(channel) = scaling.channel {
+                self.scaling.channel = channel;
+            }
+            if let Some(url) = scaling.redis_url {
+                self.scaling.redis_url = url;
+            }
+        }
+
+        if let Some(restart) = file.restart {
+            self.restart = match restart.driver.as_str() {
+                "file" => match restart.path {
+                    Some(path) => RestartWatch::file(std::path::Path::new(&path), RESTART_KEY),
+                    None => RestartWatch::Off,
+                },
+                "redis" => RestartWatch::redis(
+                    restart.redis_url.as_deref().unwrap_or(&self.scaling.redis_url),
+                    restart.prefix.as_deref().unwrap_or_default(),
+                    RESTART_KEY,
+                ),
+                // Laravel supports cache stores this cannot read, such as
+                // database or memcached. Those fall back to signals.
+                other => {
+                    tracing::warn!(
+                        driver = other,
+                        "reverb:restart is not supported on this cache store; \
+                         stop the server with SIGTERM instead"
+                    );
+
+                    RestartWatch::Off
+                }
+            };
+        }
+
+        Ok(())
+    }
+
     /// Build the configuration from the environment, applying the same
     /// defaults as the stock `config/reverb.php`.
     pub fn from_env() -> Result<Self> {
+        Self::build(true)
+    }
+
+    fn build(require_apps: bool) -> Result<Self> {
         let apps = match env("REVERB_APPS_FILE") {
             Some(path) => Self::apps_from_file(&path)?,
-            None => vec![Arc::new(Self::app_from_env()?)],
+            None if require_apps => vec![Arc::new(Self::app_from_env()?)],
+            // Something else will supply them.
+            None => Vec::new(),
         };
 
         let hostname = env("REVERB_HOST");
@@ -343,6 +523,7 @@ impl ServerConfig {
             ),
             maintenance_interval: env_parse("REVERB_MAINTENANCE_INTERVAL", 60),
             listen_backlog: env_parse("REVERB_LISTEN_BACKLOG", 4096),
+            restart: RestartWatch::Off,
         })
     }
 
@@ -386,9 +567,14 @@ impl ServerConfig {
             bail!("REVERB_APPS_FILE [{path}] defines no applications");
         }
 
-        Ok(entries
-            .into_iter()
-            .map(|e| {
+        Ok(entries.into_iter().map(application_from_file).collect())
+    }
+}
+
+/// Build an application from its exported definition.
+fn application_from_file(e: AppFileEntry) -> Arc<Application> {
+    {
+        {
                 let rl = e.rate_limiting;
                 Arc::new(Application {
                     id: e.app_id,
@@ -414,8 +600,7 @@ impl ServerConfig {
                         None => RateLimiting::default(),
                     },
                 })
-            })
-            .collect())
+        }
     }
 }
 

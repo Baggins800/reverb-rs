@@ -70,7 +70,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let mut config = ServerConfig::from_env().context("failed to load configuration")?;
+    let mut config = ServerConfig::load().context("failed to load configuration")?;
 
     // Command line options win over the environment, as in `reverb:start`.
     if let Some(host) = cli.host {
@@ -107,6 +107,7 @@ async fn main() -> Result<()> {
     }
 
     let backlog = config.listen_backlog;
+    let restart = config.restart.clone();
     let scaling = config.scaling.clone();
     let events = config.events.clone();
     let tls = config.tls.clone();
@@ -163,6 +164,17 @@ async fn main() -> Result<()> {
     let handle = Handle::new();
 
     tokio::spawn(shutdown(handle.clone(), server.clone()));
+
+    // `php artisan reverb:restart` signals through the Laravel cache rather
+    // than the process, so watch for it the way Reverb does.
+    if restart.is_enabled() {
+        let (handle, server) = (handle.clone(), server.clone());
+
+        tokio::spawn(reverb_rs::restart::watch(restart, move || {
+            reverb_rs::disconnect_all(&server);
+            handle.graceful_shutdown(Some(SHUTDOWN_GRACE));
+        }));
+    }
 
     tracing::info!(
         %addr,

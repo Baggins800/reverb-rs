@@ -13,6 +13,7 @@ pub mod metrics;
 pub mod protocol;
 pub mod pubsub;
 pub mod registry;
+pub mod restart;
 pub mod server;
 pub mod ws;
 

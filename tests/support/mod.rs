@@ -66,6 +66,22 @@ pub async fn start_with_events(
     (serve(server).await, rx)
 }
 
+/// Start a server configured entirely from an exported Laravel config.
+pub async fn start_from_config(path: &std::path::Path) -> TestServer {
+    // SAFETY: the config is read immediately below, on this thread.
+    unsafe { std::env::set_var("REVERB_CONFIG_FILE", path) };
+
+    let mut config = ServerConfig::load().expect("load the exported config");
+
+    unsafe { std::env::remove_var("REVERB_CONFIG_FILE") };
+
+    // The export names the port the Laravel app would use; the test binds its own.
+    config.port = 0;
+    config.host = "127.0.0.1".into();
+
+    serve(Arc::new(Server::new(config))).await
+}
+
 /// Start a node whose relay publishes to Redis, the way production does.
 pub async fn start_with_redis_relay(
     app: Application,
@@ -146,6 +162,7 @@ fn config_for(app: Application) -> ServerConfig {
         ws_write_buffer_size: 4096,
         maintenance_interval: 60,
         listen_backlog: 4096,
+        restart: reverb_rs::restart::RestartWatch::Off,
     }
 }
 

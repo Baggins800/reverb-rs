@@ -7,6 +7,10 @@ use Laravel\Reverb\Pulse\Recorders\ReverbMessages;
 /**
  * Reverb's messages recorder, without a second round of sampling.
  *
+ * Requires laravel/pulse, which neither this package nor laravel/reverb
+ * depends on. Referencing this class without Pulse installed is a fatal
+ * error, so only name it in config/pulse.php, which Pulse itself reads.
+ *
  * Only needed when REVERB_EVENTS_SAMPLE_RATE is below 1: the server has
  * already sampled, so sampling again here would compound the two rates and
  * the Pulse card would under-report by their product.

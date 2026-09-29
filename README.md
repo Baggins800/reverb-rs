@@ -16,14 +16,23 @@ You keep `laravel/reverb` installed. It still provides `config/reverb.php`, the 
 broadcast connection, the event classes and the Pulse cards. The only thing that changes is which
 process serves WebSockets.
 
-### 1. Build the server
+### 1. Install the package
+
+```bash
+composer require baggins800/reverb-rs
+php artisan reverb-rs:binary --build     # compiles the server; needs a Rust toolchain
+```
+
+`reverb-rs:binary` puts the server in `vendor/bin`. Without `--build` it downloads the release
+build for your platform instead. If `reverb-rs` is already on `PATH` — a system package, a
+container image — it is used as-is and nothing is installed.
+
+Prefer to build it yourself:
 
 ```bash
 git clone https://github.com/Baggins800/reverb-rs && cd reverb-rs
 cargo build --release
 ```
-
-The binary is `target/release/reverb-rs`. Copy it wherever you keep deployed binaries.
 
 ### 2. Change nothing in your application
 
@@ -50,7 +59,15 @@ broadcasts reach subscribers, `toOthers()` excludes the right socket, and the si
 
 ### 3. Run it instead of `reverb:start`
 
-Run it from the application root so it finds `.env`, or pass `--env-file`:
+```bash
+php artisan reverb-rs:start
+```
+
+That is the drop-in: it exports everything `config/reverb.php` resolves to, hands it to the
+server, and replaces itself with it — so signals and supervisors behave exactly as they did.
+It takes the same options as `reverb:start`.
+
+Running the binary directly works too, reading the same `.env`:
 
 ```bash
 cd /var/www/my-app && /usr/local/bin/reverb-rs
@@ -60,8 +77,8 @@ Supervisor — replace the `command` in your existing Reverb program:
 
 ```ini
 [program:reverb]
-command=/usr/local/bin/reverb-rs
-directory=/var/www/my-app        ; so .env is found
+command=php /var/www/my-app/artisan reverb-rs:start
+directory=/var/www/my-app
 autostart=true
 autorestart=true
 user=www-data
@@ -116,9 +133,9 @@ php artisan tinker
 >>> broadcast(new App\Events\OrderShipped(Order::first()));
 ```
 
-Your browser should receive the event. Reverb's own `php artisan reverb:restart` no longer
-applies — send `SIGTERM` (or `supervisorctl restart reverb`), which closes connections cleanly
-first.
+Your browser should receive the event. `php artisan reverb:restart` works as it always did:
+the server watches the same cache key and shuts down cleanly when it changes. `SIGTERM` does the
+same.
 
 ### 6. Optional: keep Pulse, Telescope and your listeners
 
@@ -265,8 +282,19 @@ Implemented in full:
 
 ## Configuration
 
-Every `REVERB_*` and `REDIS_*` variable from `config/reverb.php` is read with the same name and
-the same default, so an existing Laravel `.env` works as-is. Command-line flags mirror
+`php artisan reverb-rs:start` exports everything `config/reverb.php` resolves to and hands it
+over, so the config file is the source of truth — including things a `.env` cannot express:
+several applications declared inline, a custom application provider resolving them from a
+database, the `options.tls` block, and which cache store `reverb:restart` signals through. To
+inspect or pre-generate it:
+
+```bash
+php artisan reverb-rs:config --pretty > reverb-rs.json
+REVERB_CONFIG_FILE=reverb-rs.json reverb-rs
+```
+
+Run directly without that file, and every `REVERB_*` and `REDIS_*` variable is read with the
+same name and default Reverb uses, so an existing `.env` works as-is. Command-line flags mirror
 `reverb:start`:
 
 ```
@@ -332,24 +360,15 @@ dashboards.
 
 ## What is not covered
 
-- **`php artisan reverb:restart`.** Reverb polls a Laravel cache key every five seconds. Send
-  `SIGTERM` or `SIGINT` instead — connections are closed cleanly before the process exits.
-- **`php artisan reverb:install`.** Scaffolding for a Laravel app; not applicable.
 - **Listeners that write to a connection.** A relayed event carries a connection you can read —
   its ID, origin and application are faithful — but `send()`, `control()` and `terminate()` throw,
   because the socket lives in the server process. Broadcast to the channel, or use the HTTP API's
   `terminate_connections` endpoint.
-- **Custom `ApplicationProvider` drivers.** Reverb resolves applications through an
-  `ApplicationManager`, so a package can register a database-backed provider for dynamic
-  tenancy. `reverb-rs` reads applications from the environment or `REVERB_APPS_FILE` only, both
-  of which are static for the life of the process.
-- **`config/reverb.php` is not read.** Configuration comes from the environment. That is
-  equivalent for a stock config file, which is entirely `env()` calls — but if you hardcoded
-  values there, or declared several applications inline, export them to `REVERB_APPS_FILE`.
-- **The `options.tls` config array.** Reverb passes a PHP stream context (`local_cert`,
-  `local_pk`, `verify_peer`, `passphrase`, …). Here TLS is `REVERB_SERVER_TLS_CERT` and
-  `REVERB_SERVER_TLS_KEY`. Herd and Valet certificate discovery from `REVERB_HOST` does work,
-  so local HTTPS development behaves the same.
+- **Applications that change while the server runs.** A custom `ApplicationProvider` backed by a
+  database is exported correctly by `reverb-rs:config`, but the export is a snapshot: adding a
+  tenant needs a restart, where Reverb would have picked it up on the next connection.
+- **`verify_peer` and `passphrase` in the `options.tls` array.** The certificate and key are
+  read; client-certificate verification and encrypted private keys are not.
 - **Mixed-language Redis clusters.** Reverb PHP-serializes the `Application` object into its
   pub/sub envelope; `reverb-rs` sends the application ID as JSON. The envelope is otherwise the
   same shape, so a scaled cluster must be all-Rust or all-PHP — which matters only during a
@@ -396,7 +415,7 @@ REVERB_TEST_PHP_APP=/tmp/reverb-rs-test-app \
   cargo test
 ```
 
-123 tests, all in Rust. The PHP — both Laravel's broadcaster and the companion package — is
+132 tests, all in Rust. The PHP — both Laravel's broadcaster and the companion package — is
 driven from here rather than carrying a second test framework. Unit tests cover protocol formatting, signing, channel classification and metrics
 merging. `tests/protocol.rs` drives a live server through the Pusher handshake, all six channel
 types, presence membership, cache replay, client events, rate limiting, origin checks and quotas.
@@ -410,7 +429,9 @@ the five events, the rebuilt channel subclasses, that a relayed connection refus
 to, that a throwing listener cannot stop the relay, and that unknown applications and malformed
 payloads are discarded.
 
-`tests/laravel.rs` is the one that matters for a migration: it runs Laravel's own
+`tests/config.rs` runs the real `reverb-rs:config` export against a Laravel app and starts a
+server from it, covers `reverb:restart`, and boots the server through `php artisan
+reverb-rs:start`. `tests/laravel.rs` is the one that matters for a migration: it runs Laravel's own
 `Broadcast::connection('reverb')` against `reverb-rs` and asserts that broadcasts reach
 subscribers, that `toOthers()` excludes the right socket, that the signatures
 `/broadcasting/auth` returns are accepted for private and presence channels, and that the Pusher
@@ -434,7 +455,8 @@ own test suite.
 | `src/metrics.rs` | Channel statistics, local and merged across nodes |
 | `src/pubsub.rs` | Redis scaling |
 | `src/events.rs` | Counters and the event relay |
-| `laravel/` | Companion package that re-dispatches the events |
+| `src/restart.rs` | Watching the cache key `reverb:restart` writes |
+| `laravel/` | Composer package: artisan commands and the event relay |
 | `examples/benchmark.rs` | Starts both servers and writes `benchmark.md` |
 | `examples/bench.rs` | Load generator for a single server |
 | `Dockerfile`, `docker-compose.yml` | Container build and a deployment with Redis |
