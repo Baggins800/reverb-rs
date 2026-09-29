@@ -1,0 +1,60 @@
+# A reverb-rs deployment, with the pieces a Laravel application needs.
+#
+#   docker compose up -d
+#   docker compose --profile scaled up -d --scale reverb=3
+#
+# Point your application at http://reverb:8080 (or the published port) and
+# keep REVERB_APP_* identical on both sides.
+
+services:
+  reverb:
+    build: .
+    image: reverb-rs:latest
+    restart: unless-stopped
+    ports:
+      - "${REVERB_PUBLISH_PORT:-8080}:8080"
+    environment:
+      REVERB_APP_ID: "${REVERB_APP_ID:?set REVERB_APP_ID}"
+      REVERB_APP_KEY: "${REVERB_APP_KEY:?set REVERB_APP_KEY}"
+      REVERB_APP_SECRET: "${REVERB_APP_SECRET:?set REVERB_APP_SECRET}"
+      REVERB_SERVER_HOST: "0.0.0.0"
+      REVERB_SERVER_PORT: "8080"
+
+      # Fan broadcasts across every replica. Required if you scale this service.
+      REVERB_SCALING_ENABLED: "${REVERB_SCALING_ENABLED:-false}"
+      REVERB_SCALING_CHANNEL: "reverb"
+
+      # Relay Reverb's events back to the application. See laravel/.
+      REVERB_EVENTS_ENABLED: "${REVERB_EVENTS_ENABLED:-false}"
+      REVERB_EVENTS_CHANNEL: "reverb-rs:events"
+      REVERB_EVENTS_TYPES: "${REVERB_EVENTS_TYPES:-channel_created,channel_removed,connection_pruned}"
+      REVERB_EVENTS_SAMPLE_RATE: "${REVERB_EVENTS_SAMPLE_RATE:-1.0}"
+
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      redis:
+        condition: service_healthy
+    # The image has no shell, so the binary probes itself.
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/reverb-rs", "--healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    # Long-lived sockets need file descriptors more than anything else.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    stop_grace_period: 15s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5

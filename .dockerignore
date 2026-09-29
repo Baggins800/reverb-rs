@@ -1,0 +1,6 @@
+target/
+.git/
+.env
+laravel/vendor/
+bench/
+*.md

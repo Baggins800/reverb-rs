@@ -1,0 +1,7 @@
+/target
+.env
+
+# Created by the benchmark and by the Laravel companion package's tooling.
+/bench/results.json
+/laravel/vendor
+/laravel/composer.lock
