@@ -15,7 +15,9 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE: ghcr.io/${{ github.repository }}
+  # Registry names must be lowercase, and github.repository keeps the owner's
+  # capitals (Baggins800); Actions expressions have no lower() to fix that.
+  IMAGE: ghcr.io/baggins800/reverb-rs
 
 jobs:
   # Each architecture is built on its own runner rather than emulated: a Rust
