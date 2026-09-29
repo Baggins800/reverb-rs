@@ -1,4 +1,4 @@
-# reverb-rs/laravel
+# baggins800/reverb-rs
 
 Relays [`reverb-rs`](../) server events onto your Laravel event bus.
 
@@ -14,8 +14,12 @@ cards and its broadcaster; you just stop running `php artisan reverb:start`.
 
 ```bash
 composer require baggins800/reverb-rs
-php artisan reverb-rs:binary --build     # or omit --build to download a release
+php artisan reverb-rs:binary --build
 ```
+
+`--build` compiles the Rust sources shipped with this package and needs a Rust toolchain.
+Omitting it downloads a prebuilt release, but none have been published yet, so that path
+currently fails. A `reverb-rs` already on `PATH` is used as-is.
 
 ## Commands
 
@@ -52,11 +56,12 @@ dispatch every event once per process.
 The default is the three lifecycle events, which fire rarely and cost nothing measurable. The two
 message events fire **once per delivered frame**, so relaying them has a real price:
 
-| Setting | Fan-out (1000 subscribers) | Events dropped |
+| Setting | Fan-out (500 subscribers) | Events dropped |
 |---|---|---|
-| Lifecycle only (default) | 846k frames/s | none |
-| `all`, `SAMPLE_RATE=1` | 774k frames/s | 45% — Redis could not keep up |
-| `all`, `SAMPLE_RATE=0.05` | 828k frames/s | none |
+| Relay off | 1,552k msg/s | — |
+| Lifecycle only (default) | 1,597k msg/s | none |
+| `all`, `SAMPLE_RATE=1` | 1,263k msg/s | 43% — Redis could not keep up |
+| `all`, `SAMPLE_RATE=0.05` | 1,459k msg/s | none |
 
 The relay sheds load rather than slowing the server down: when its queue saturates it drops
 events, logs a warning once, and reports the running total as `events_dropped` on

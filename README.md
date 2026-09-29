@@ -20,12 +20,19 @@ process serves WebSockets.
 
 ```bash
 composer require baggins800/reverb-rs
-php artisan reverb-rs:binary --build     # compiles the server; needs a Rust toolchain
+php artisan reverb-rs:binary --build
 ```
 
-`reverb-rs:binary` puts the server in `vendor/bin`. Without `--build` it downloads the release
-build for your platform instead. If `reverb-rs` is already on `PATH` — a system package, a
-container image — it is used as-is and nothing is installed.
+`--build` compiles the Rust sources shipped in the package, so it needs a Rust toolchain
+([rustup.rs](https://rustup.rs)) and takes a few minutes the first time. The binary lands in
+`vendor/bin`, where the other commands look for it.
+
+If `reverb-rs` is already on `PATH` — a system package, a container image — it is used as-is
+and nothing is installed.
+
+Without `--build` the command downloads a prebuilt release instead. **No releases have been
+published yet**, so that path currently fails; build from source or use the container until
+one exists.
 
 Prefer to build it yourself:
 
@@ -133,9 +140,10 @@ php artisan tinker
 >>> broadcast(new App\Events\OrderShipped(Order::first()));
 ```
 
-Your browser should receive the event. `php artisan reverb:restart` works as it always did:
-the server watches the same cache key and shuts down cleanly when it changes. `SIGTERM` does the
-same.
+Your browser should receive the event. `php artisan reverb:restart` keeps working if your cache
+store is `file` or `redis`: the server watches the same key and shuts down cleanly when it
+changes. On any other store it logs a warning at startup and you restart with `SIGTERM`, which
+does the same thing.
 
 ### 6. Optional: keep Pulse, Telescope and your listeners
 
@@ -199,7 +207,7 @@ memory is genuinely idle, and writes `benchmark.md`. To load-test a single serve
 
 PHP could not complete a 2000-connection run at all: stock PHP has no `ext-event`, so ReactPHP
 falls back to `StreamSelectLoop` and `select(2)` caps it at `FD_SETSIZE` (1024) descriptors.
-reverb-rs was tested to 5000 connections at 55 MB. That ceiling is a property of the PHP install
+reverb-rs was tested to 5000 connections at 50 MB. That ceiling is a property of the PHP install
 rather than of Reverb's design — installing `ext-event`, `ext-ev` or `ext-uv` lifts it, though
 the server stays single-threaded either way.
 
@@ -213,7 +221,7 @@ docker run -d -p 8080:8080 \
   reverb-rs
 ```
 
-A multi-stage build on `rust:bookworm` producing a `distroless/cc` image — **31.8 MB**, no shell,
+A multi-stage build on `rust:bookworm` producing a `distroless/cc` image — **31.9 MB**, no shell,
 running as `nonroot`. The binary is PID 1 and handles `SIGTERM` itself, so `docker stop` closes
 client connections cleanly before the process exits.
 
@@ -323,7 +331,7 @@ See `.env.example` for the rest.
 
 Reverb dispatches five events from inside the server process, and Pulse, Telescope and any
 listeners you wrote hang off them. `reverb-rs` publishes the same five to Redis; the
-[`reverb-rs/laravel`](laravel/) companion package re-dispatches them in your application as the
+[`baggins800/reverb-rs`](laravel/) companion package re-dispatches them in your application as the
 real `Laravel\Reverb\Events\*` objects, so all of that keeps working:
 
 ```dotenv
@@ -344,10 +352,10 @@ and relayed only when asked for. Measured at 1000 subscribers:
 
 | Setting | Fan-out | Events dropped |
 |---|---|---|
-| Relay off | 877k frames/s | — |
-| Lifecycle events only (default) | 846k frames/s | none |
-| `all`, sample rate 1 | 774k frames/s | 45%, Redis could not keep up |
-| `all`, sample rate 0.05 | 828k frames/s | none |
+| Relay off | 1,552k msg/s | — |
+| Lifecycle events only (default) | 1,597k msg/s | none |
+| `all`, sample rate 1 | 1,263k msg/s | 43%, Redis could not keep up |
+| `all`, sample rate 0.05 | 1,459k msg/s | none |
 
 The relay sheds load rather than slowing the server: on a saturated queue it drops events, warns
 once, and reports the total as `events_dropped` on `GET /apps/{id}/counters`. Watch that counter
@@ -369,6 +377,9 @@ dashboards.
   tenant needs a restart, where Reverb would have picked it up on the next connection.
 - **`verify_peer` and `passphrase` in the `options.tls` array.** The certificate and key are
   read; client-certificate verification and encrypted private keys are not.
+- **`reverb:restart` on cache stores other than `file` and `redis`.** Those two are read
+  directly; `database`, `memcached` and the rest are not, so the server logs a warning at
+  startup and you stop it with a signal instead.
 - **Mixed-language Redis clusters.** Reverb PHP-serializes the `Application` object into its
   pub/sub envelope; `reverb-rs` sends the application ID as JSON. The envelope is otherwise the
   same shape, so a scaled cluster must be all-Rust or all-PHP — which matters only during a
