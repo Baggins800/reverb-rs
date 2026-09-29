@@ -13,6 +13,13 @@ use crate::conn::{Conn, Outbound};
 use crate::protocol::PusherError;
 use crate::server::Server;
 
+/// How many queued frames may be coalesced into one write.
+///
+/// Only frames that are *already* waiting are batched, so this never adds
+/// latency — it just stops a burst costing one syscall per message. The cap
+/// keeps a badly backed-up connection from monopolising its task.
+const MAX_WRITE_BATCH: usize = 128;
+
 pub async fn handler(
     ws: WebSocketUpgrade,
     Path(app_key): Path<String>,
@@ -34,12 +41,11 @@ pub async fn handler(
     };
 
     let max_message_size = app.max_message_size;
-    let buffer = server.config.ws_buffer_size;
 
     ws.max_message_size(max_message_size)
         .max_frame_size(max_message_size)
-        .read_buffer_size(buffer)
-        .write_buffer_size(buffer)
+        .read_buffer_size(server.config.ws_read_buffer_size)
+        .write_buffer_size(server.config.ws_write_buffer_size)
         .on_upgrade(move |socket| serve(socket, server, app, origin))
 }
 
@@ -64,13 +70,38 @@ async fn serve(
             outgoing = rx.recv() => {
                 let Some(frame) = outgoing else { break };
 
-                let message = match frame {
-                    Outbound::Text(text) => Message::Text(text),
-                    Outbound::Ping => Message::Ping(Default::default()),
-                    Outbound::Close => break,
-                };
+                // Write this frame and everything already behind it, then
+                // flush once. A fan-out burst costs one syscall instead of
+                // one per subscriber message.
+                let mut pending = Some(frame);
+                let mut written = 0;
+                let mut finished = false;
 
-                if socket.send(message).await.is_err() {
+                while let Some(frame) = pending.take() {
+                    let message = match frame {
+                        Outbound::Text(text) => Message::Text(text),
+                        Outbound::Ping => Message::Ping(Default::default()),
+                        Outbound::Close => {
+                            finished = true;
+                            break;
+                        }
+                    };
+
+                    if socket.feed(message).await.is_err() {
+                        finished = true;
+                        break;
+                    }
+
+                    written += 1;
+
+                    if written < MAX_WRITE_BATCH {
+                        pending = rx.try_recv().ok();
+                    }
+                }
+
+                // Flush even when closing, so a queued error frame still
+                // reaches the client before the socket goes away.
+                if socket.flush().await.is_err() || finished {
                     break;
                 }
             }

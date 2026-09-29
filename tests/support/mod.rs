@@ -142,7 +142,8 @@ fn config_for(app: Application) -> ServerConfig {
         },
         apps: vec![Arc::new(app)],
         send_queue_depth: 1024,
-        ws_buffer_size: 4096,
+        ws_read_buffer_size: 4096,
+        ws_write_buffer_size: 4096,
         maintenance_interval: 60,
         listen_backlog: 4096,
     }

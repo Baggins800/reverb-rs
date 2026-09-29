@@ -205,11 +205,18 @@ pub struct ServerConfig {
     /// Per-connection outbound queue depth. A client that falls this far behind
     /// is disconnected rather than allowed to consume unbounded memory.
     pub send_queue_depth: usize,
-    /// Bytes reserved per direction for each WebSocket's framing buffers.
+    /// Bytes reserved for each WebSocket's inbound framing buffer.
     ///
-    /// Pusher frames are small, so the library default of 128 KiB per direction
-    /// would dominate memory long before the connections themselves did.
-    pub ws_buffer_size: usize,
+    /// Pusher client frames are small — a subscribe is a few hundred bytes —
+    /// so the library default of 128 KiB would dominate memory long before the
+    /// connections themselves did. This is preallocated per connection.
+    pub ws_read_buffer_size: usize,
+    /// How much outbound data to accumulate before writing to the socket.
+    ///
+    /// Larger values coalesce more frames into one syscall but leave a bigger
+    /// buffer resident per connection. This one grows on demand rather than
+    /// being preallocated.
+    pub ws_write_buffer_size: usize,
     /// Seconds between prune-and-ping sweeps. Reverb's is fixed at 60.
     pub maintenance_interval: u64,
     /// Pending-connection queue depth passed to `listen(2)`.
@@ -326,7 +333,14 @@ impl ServerConfig {
             },
             apps,
             send_queue_depth: env_parse("REVERB_SEND_QUEUE_DEPTH", 1024),
-            ws_buffer_size: env_parse("REVERB_WS_BUFFER_SIZE", 4096),
+            ws_read_buffer_size: env_parse(
+                "REVERB_WS_READ_BUFFER",
+                env_parse("REVERB_WS_BUFFER_SIZE", 1024),
+            ),
+            ws_write_buffer_size: env_parse(
+                "REVERB_WS_WRITE_BUFFER",
+                env_parse("REVERB_WS_BUFFER_SIZE", 2048),
+            ),
             maintenance_interval: env_parse("REVERB_MAINTENANCE_INTERVAL", 60),
             listen_backlog: env_parse("REVERB_LISTEN_BACKLOG", 4096),
         })

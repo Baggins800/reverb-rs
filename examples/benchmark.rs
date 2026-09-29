@@ -354,7 +354,11 @@ fn report(php: &Results, rust: &Results, meta: &Meta) -> String {
 
         if scenario.memory_only {
             out.push_str(
-                "Connections are opened and held, then memory is sampled. Throughput and CPU\n                 are not reported: the run is too short for `/proc`'s 10ms accounting to say\n                 anything meaningful about them.\n\n",
+                concat!(
+                    "Connections are opened and held, then memory is sampled. ",
+                    "Throughput and CPU are not reported: the run is too short for ",
+                    "`/proc`'s 10ms accounting to say anything meaningful about them.\n\n",
+                ),
             );
         }
 

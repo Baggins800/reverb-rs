@@ -141,6 +141,12 @@ which is `select(2)` and therefore capped at `FD_SETSIZE` (1024) descriptors.
 Tokio runtime across every core, one encoded frame shared by reference across all subscribers of
 a channel, and no garbage collector.
 
+The single largest win came from counting syscalls rather than guessing. Writing each frame
+individually cost one `sendto` per message; coalescing the frames already queued for a connection
+into one flush took 2,101 syscalls down to 428 for the same 2,000 messages, and CPU per message
+with it. Nothing waits to be batched — only frames already sitting in the queue are gathered — so
+an idle connection's latency is unchanged.
+
 ## Measured against the real thing
 
 Full results and method are in **[benchmark.md](benchmark.md)**. The headline, from
@@ -149,18 +155,18 @@ messages, median of three runs on 14 cores:
 
 | | Laravel Reverb | reverb-rs | |
 |---|---|---|---|
-| Messages delivered | 142,328 msg/s | 1,179,675 msg/s | **8.3× faster** |
-| Wire throughput | 200 Mbit/s | 1661 Mbit/s | **8.3×** |
-| CPU per message | 5.80 µs | 3.64 µs | **1.6× less** |
-| Latency p50 | 52.4 ms | 6.4 ms | **8.2× lower** |
-| Memory idle | 53.0 MB | 6.9 MB | **7.7× smaller** |
-| Memory per connection | 33.8 KB | 13.9 KB | **2.4× smaller** |
+| Messages delivered | 138,006 msg/s | 1,646,182 msg/s | **11.9× faster** |
+| Wire throughput | 194 Mbit/s | 2318 Mbit/s | **11.9×** |
+| CPU per message | 5.98 µs | 1.82 µs | **3.3× less** |
+| Latency p50 | 54.6 ms | 3.8 ms | **14.2× lower** |
+| Memory idle | 53.0 MB | 6.7 MB | **7.9× smaller** |
+| Memory per idle connection | 21.8 KB | 6.9 KB | **3.1× smaller** |
 
 Two of those deserve a word. **CPU per message** is the figure that survives a change of
 hardware: it is the work each server does to put one frame on one socket, and reverb-rs needs
-1.6× less of it. The 8.3× in wall-clock terms is that efficiency multiplied by being able to use
-more than one core, which Reverb by design cannot. **Wire throughput** is loopback, so read it
-as a ceiling the server does not impose rather than a rate a real NIC would carry.
+3.3× less of it. The 11.9× in wall-clock terms is that efficiency multiplied by being able to
+use more than one core, which Reverb by design cannot. **Wire throughput** is loopback, so read
+it as a ceiling the server does not impose rather than a rate a real NIC would carry.
 
 Reproduce it:
 
@@ -268,9 +274,22 @@ reverb-rs --host 0.0.0.0 --port 8080 --path /ws --hostname reverb.example.com --
 ```
 
 For the multi-application `config` provider, export the `reverb.apps.apps` array to JSON and
-point `REVERB_APPS_FILE` at it. A few knobs have no Reverb equivalent — `REVERB_WS_BUFFER_SIZE`,
-`REVERB_SEND_QUEUE_DEPTH`, `REVERB_LISTEN_BACKLOG`, `REVERB_SERVER_TLS_CERT`/`_KEY` and
-`REVERB_APP_ALLOWED_ORIGINS`; see `.env.example`.
+point `REVERB_APPS_FILE` at it.
+
+A few knobs have no Reverb equivalent. The defaults are what the benchmark settled on and are
+worth leaving alone unless you are measuring:
+
+| | |
+|---|---|
+| `REVERB_WS_READ_BUFFER` | Inbound framing buffer, preallocated per connection. Default 1024. |
+| `REVERB_WS_WRITE_BUFFER` | Outbound bytes to accumulate before writing. Larger coalesces more frames per syscall but leaves more resident. Default 2048. |
+| `REVERB_SEND_QUEUE_DEPTH` | Frames a slow client may fall behind before being disconnected. Default 1024. |
+| `REVERB_LISTEN_BACKLOG` | `listen(2)` queue depth. Default 4096; too small costs reconnecting clients a one-second SYN retransmit. |
+| `REVERB_MAINTENANCE_INTERVAL` | Seconds between ping/prune sweeps. Default 60, matching Reverb. |
+| `REVERB_SERVER_TLS_CERT` / `_KEY` | Terminate TLS in the server. |
+| `REVERB_APP_ALLOWED_ORIGINS` | Comma-separated origin allow-list. |
+
+See `.env.example` for the rest.
 
 ## Observability
 
