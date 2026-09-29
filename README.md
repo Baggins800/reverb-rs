@@ -19,7 +19,7 @@ process serves WebSockets.
 ### 1. Build the server
 
 ```bash
-git clone https://github.com/you/reverb-rs && cd reverb-rs
+git clone https://github.com/Baggins800/reverb-rs && cd reverb-rs
 cargo build --release
 ```
 
