@@ -119,9 +119,10 @@ class ConfigCommand extends Command
     /**
      * The Redis key reverb:restart writes through a Redis cache store.
      *
-     * Two prefixes stack: the cache store's, which Laravel's RedisStore
-     * follows with a colon, and the connection's own `options.prefix`, which
-     * the Redis client prepends to every key it touches.
+     * Two prefixes stack: the cache store's and the connection's own
+     * `options.prefix`, which the Redis client prepends to every key it
+     * touches. RedisStore stores the cache prefix exactly as given since
+     * Laravel 11; Laravel 10 appended a colon to it.
      *
      * @return array<string, mixed>
      */
@@ -133,9 +134,13 @@ class ConfigCommand extends Command
         $storePrefix = $config->get("cache.stores.{$store}.prefix", $config->get('cache.prefix'));
         $clientPrefix = $connection['options']['prefix'] ?? $config->get('database.redis.options.prefix', '');
 
+        if ($storePrefix && version_compare($this->laravel->version(), '11.0.0', '<')) {
+            $storePrefix .= ':';
+        }
+
         return [
             'driver' => 'redis',
-            'prefix' => $clientPrefix.($storePrefix ? $storePrefix.':' : ''),
+            'prefix' => $clientPrefix.$storePrefix,
             'redis_url' => $this->redisUrl($connection),
         ];
     }

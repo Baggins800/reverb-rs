@@ -152,10 +152,14 @@ mod tests {
     #[test]
     fn prefixes_the_redis_key() {
         assert_eq!(
-            RestartWatch::redis("redis://localhost", "laravel_cache_:", RESTART_KEY),
+            RestartWatch::redis(
+                "redis://localhost",
+                "laravel_database_laravel_cache_",
+                RESTART_KEY
+            ),
             RestartWatch::Redis {
                 url: "redis://localhost".into(),
-                key: "laravel_cache_:laravel:reverb:restart".into(),
+                key: "laravel_database_laravel_cache_laravel:reverb:restart".into(),
             }
         );
     }
