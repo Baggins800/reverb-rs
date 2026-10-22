@@ -51,9 +51,15 @@ dispatch every event once per process.
 ## Which events to relay
 
 `REVERB_EVENTS_TYPES` takes a comma-separated list of `message_sent`, `message_received`,
-`channel_created`, `channel_removed`, `connection_pruned` — or `all`, or `none`.
+`channel_created`, `channel_removed`, `connection_pruned`, `member_added`, `member_removed` — or
+`all`, or `none`.
 
-The default is the three lifecycle events, which fire rarely and cost nothing measurable. The two
+`member_added` and `member_removed` are dispatched as `ReverbRs\Events\MemberAdded` and
+`ReverbRs\Events\MemberRemoved`, carrying the channel, socket ID and user ID. Reverb has no such
+events; they fire once per user joining or leaving a presence channel, even when nobody else is
+subscribed to hear it.
+
+The default is the lifecycle and presence events, which fire rarely and cost nothing measurable. The two
 message events fire **once per delivered frame**, so relaying them has a real price:
 
 | Setting | Fan-out (500 subscribers) | Events dropped |
@@ -64,8 +70,8 @@ message events fire **once per delivered frame**, so relaying them has a real pr
 | `all`, `SAMPLE_RATE=0.05` | 1,459k msg/s | none |
 
 The relay sheds load rather than slowing the server down: when its queue saturates it drops
-events, logs a warning once, and reports the running total as `events_dropped` on
-`GET /apps/{id}/counters`. **Check that counter after enabling message events.** If it is
+message events, logs a warning at most every ten seconds, and reports the running total as
+`events_dropped` on `GET /apps/{id}/counters`. **Check that counter after enabling message events.** If it is
 climbing, lower `REVERB_EVENTS_SAMPLE_RATE`.
 
 Those numbers are from a synthetic peak. A server doing a few thousand frames a second relays

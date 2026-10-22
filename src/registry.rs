@@ -87,6 +87,16 @@ impl AppRegistry {
         self.channels.iter().map(|entry| entry.value().clone()).collect()
     }
 
+    /// Whether `channel` is still the one registered under its name.
+    ///
+    /// A channel is removed the moment it empties, so a subscriber that
+    /// looked it up just before then can join a channel nobody broadcasts to.
+    /// Checking after joining catches that: once a channel has a member it
+    /// cannot be removed, so the answer stays true.
+    pub fn holds(&self, channel: &Arc<Channel>) -> bool {
+        self.channels.get(&channel.name).is_some_and(|current| Arc::ptr_eq(&current, channel))
+    }
+
     /// Drop a channel once its last subscriber leaves.
     pub fn remove_channel(&self, name: &str) {
         // Re-check emptiness while holding the shard lock so a subscription
@@ -96,22 +106,42 @@ impl AppRegistry {
         }
     }
 
-    /// Remove a connection from every channel it belongs to, returning the
-    /// channels it was actually subscribed to along with its membership.
-    pub fn unsubscribe_from_all(&self, socket_id: &str) -> Vec<(Arc<Channel>, Member)> {
-        let mut removed = Vec::new();
+    /// Remove a connection from one channel, dropping the channel if that
+    /// emptied it. Returns the membership and whether it was the user's last
+    /// connection, as [`Channel::unsubscribe`] does.
+    pub fn leave(&self, channel: &Channel, socket_id: &str) -> Option<(Member, bool)> {
+        let left = channel.unsubscribe(socket_id)?;
 
-        for channel in self.channels() {
-            if let Some(member) = channel.unsubscribe(socket_id) {
-                removed.push((channel.clone(), member));
-            }
-
-            if channel.is_empty() {
-                self.remove_channel(&channel.name);
-            }
+        if channel.is_empty() {
+            self.remove_channel(&channel.name);
         }
 
-        removed
+        Some(left)
+    }
+
+    /// The channels a connection belongs to, read from the connection's own
+    /// record so the cost is its subscriptions rather than every channel.
+    pub fn channels_of(&self, conn: &Conn) -> Vec<Arc<Channel>> {
+        conn.channel_names().iter().filter_map(|name| self.find(name)).collect()
+    }
+
+    /// A connection's membership, preferring one that carries presence data,
+    /// as [`subscribed_connections`](Self::subscribed_connections) would
+    /// report it.
+    pub fn membership_of(&self, conn: &Conn) -> Option<Member> {
+        let mut found: Option<Member> = None;
+
+        for channel in self.channels_of(conn) {
+            let Some(member) = channel.find(&conn.id) else { continue };
+
+            if member.user_id().is_some() {
+                return Some(member);
+            }
+
+            found.get_or_insert(member);
+        }
+
+        found
     }
 
     /// The connections visible to the metrics endpoints: those subscribed to at
@@ -209,12 +239,11 @@ mod tests {
         let registry = AppRegistry::new("app-id".into(), Arc::new(Telemetry::disabled()));
         let conn = conn();
 
-        registry.find_or_create("test-channel").subscribe(conn.clone(), json!(null));
+        let channel = registry.find_or_create("test-channel");
+        channel.subscribe(conn.clone(), json!(null));
         assert_eq!(registry.channels().len(), 1);
 
-        let removed = registry.unsubscribe_from_all(&conn.id);
-
-        assert_eq!(removed.len(), 1);
+        assert!(registry.leave(&channel, &conn.id).is_some());
         assert_eq!(registry.channels().len(), 0);
     }
 
@@ -227,10 +256,43 @@ mod tests {
         channel.subscribe(one.clone(), json!(null));
         channel.subscribe(two.clone(), json!(null));
 
-        registry.unsubscribe_from_all(&one.id);
+        registry.leave(&channel, &one.id);
 
         assert_eq!(registry.channels().len(), 1);
         assert_eq!(channel.len(), 1);
+    }
+
+    #[test]
+    fn finds_only_the_channels_a_connection_joined() {
+        let registry = AppRegistry::new("app-id".into(), Arc::new(Telemetry::disabled()));
+        let (one, two) = (conn(), conn());
+
+        registry.find_or_create("mine").subscribe(one.clone(), json!(null));
+        registry.find_or_create("theirs").subscribe(two.clone(), json!(null));
+
+        let names: Vec<String> =
+            registry.channels_of(&one).iter().map(|channel| channel.name.clone()).collect();
+
+        assert_eq!(names, vec!["mine"]);
+    }
+
+    #[test]
+    fn notices_a_channel_removed_after_it_was_looked_up() {
+        let registry = AppRegistry::new("app-id".into(), Arc::new(Telemetry::disabled()));
+        let channel = registry.find_or_create("test-channel");
+
+        assert!(registry.holds(&channel));
+
+        // Empty, so a departure elsewhere removes it before anyone joins.
+        registry.remove_channel("test-channel");
+        channel.subscribe(conn(), json!(null));
+
+        assert!(!registry.holds(&channel), "the stale channel is no longer registered");
+
+        let successor = registry.find_or_create("test-channel");
+
+        assert!(!Arc::ptr_eq(&channel, &successor));
+        assert!(registry.holds(&successor));
     }
 
     #[test]
@@ -247,6 +309,7 @@ mod tests {
 
         assert_eq!(connections.len(), 1);
         assert_eq!(connections[&conn.id].user_id().as_deref(), Some("7"));
+        assert_eq!(registry.membership_of(&conn).and_then(|m| m.user_id()).as_deref(), Some("7"));
     }
 
     #[test]

@@ -82,6 +82,11 @@ pub enum PusherError {
     NotAChannelMember,
     /// No pong was received within the ping window.
     PongNotReceived,
+    /// A subscription named an empty or over-long channel. Not a Reverb error.
+    InvalidChannelName,
+    /// The connection already holds as many subscriptions as it may. Not a
+    /// Reverb error.
+    SubscriptionLimitExceeded,
 }
 
 impl PusherError {
@@ -90,9 +95,11 @@ impl PusherError {
             Self::ApplicationDoesNotExist => 4001,
             Self::ConnectionLimitExceeded => 4004,
             Self::Unauthorized | Self::InvalidOrigin | Self::NotAChannelMember => 4009,
-            Self::InvalidMessageFormat => 4200,
+            Self::InvalidMessageFormat | Self::InvalidChannelName => 4200,
             Self::PongNotReceived => 4201,
-            Self::RateLimitExceeded | Self::ClientEventsDisabled => 4301,
+            Self::RateLimitExceeded
+            | Self::ClientEventsDisabled
+            | Self::SubscriptionLimitExceeded => 4301,
         }
     }
 
@@ -107,6 +114,8 @@ impl PusherError {
             Self::ClientEventsDisabled => "The app does not have client messaging enabled.",
             Self::NotAChannelMember => "The client is not a member of the specified channel.",
             Self::PongNotReceived => "Pong reply not received in time",
+            Self::InvalidChannelName => "Invalid channel name",
+            Self::SubscriptionLimitExceeded => "Subscription limit exceeded",
         }
     }
 

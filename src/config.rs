@@ -183,7 +183,14 @@ pub struct EventsConfig {
     /// Events per Redis publish, and how long to wait to fill a batch.
     pub batch_size: usize,
     pub flush_interval_ms: u64,
+    /// How many message events may wait for Redis.
     pub queue_depth: usize,
+    /// How many bytes of message frames may wait for Redis. Each message
+    /// event carries a copy of its frame, so a count alone bounds nothing.
+    pub queue_bytes: usize,
+    /// Whether message events carry the frame itself. Off, they still count
+    /// for Pulse but no payload — job output, whispers — is copied to Redis.
+    pub message_bodies: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -223,6 +230,8 @@ pub struct ServerConfig {
     pub ws_write_buffer_size: usize,
     /// Seconds between prune-and-ping sweeps. Reverb's is fixed at 60.
     pub maintenance_interval: u64,
+    /// How many channels one connection may join. Reverb sets no limit.
+    pub max_channels_per_connection: usize,
     /// Pending-connection queue depth passed to `listen(2)`.
     ///
     /// Clients reconnecting en masse — a deploy, a network blip — arrive as one
@@ -267,7 +276,17 @@ struct ConfigFile {
     scaling: Option<ScalingSection>,
     #[serde(default)]
     restart: Option<RestartSection>,
+    #[serde(default)]
+    events: Option<EventsSection>,
     apps: Vec<AppFileEntry>,
+}
+
+/// Where the event relay publishes. The rest of the relay is configured
+/// from the environment, which is where Reverb has nothing to say about it.
+#[derive(Debug, Deserialize)]
+struct EventsSection {
+    #[serde(default)]
+    redis_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -432,6 +451,10 @@ impl ServerConfig {
             }
         }
 
+        if let Some(url) = file.events.and_then(|events| events.redis_url) {
+            self.events.redis_url = url;
+        }
+
         if let Some(restart) = file.restart {
             self.restart = match restart.driver.as_str() {
                 "file" => match restart.path {
@@ -512,6 +535,8 @@ impl ServerConfig {
                 batch_size: env_parse("REVERB_EVENTS_BATCH_SIZE", 500),
                 flush_interval_ms: env_parse("REVERB_EVENTS_FLUSH_MS", 100),
                 queue_depth: env_parse("REVERB_EVENTS_QUEUE_DEPTH", 100_000),
+                queue_bytes: env_parse("REVERB_EVENTS_QUEUE_BYTES", 64 * 1024 * 1024),
+                message_bodies: env_bool("REVERB_EVENTS_MESSAGE_BODIES", true),
             },
             apps,
             send_queue_depth: env_parse("REVERB_SEND_QUEUE_DEPTH", 1024),
@@ -524,6 +549,7 @@ impl ServerConfig {
                 env_parse("REVERB_WS_BUFFER_SIZE", 2048),
             ),
             maintenance_interval: env_parse("REVERB_MAINTENANCE_INTERVAL", 60),
+            max_channels_per_connection: env_parse("REVERB_MAX_CHANNELS_PER_CONNECTION", 100),
             listen_backlog: env_parse("REVERB_LISTEN_BACKLOG", 4096),
             restart: RestartWatch::Off,
         })
@@ -589,10 +615,12 @@ fn application_from_file(e: AppFileEntry) -> Arc<Application> {
                 allowed_origins: e.allowed_origins.unwrap_or_else(|| vec!["*".into()]),
                 max_message_size: e.max_message_size.unwrap_or(10_000),
                 max_connections: e.max_connections,
-                // Reverb's config provider defaults this to "all" when the
-                // key is absent from the app definition.
+                // Reverb's config provider falls back to "all" when the key
+                // is absent, which lets any socket whisper on any channel.
+                // The stock `config/reverb.php` and the environment both say
+                // "members", so an absent key means the same here.
                 accept_client_events_from: ClientEvents::parse(
-                    e.accept_client_events_from.as_deref().unwrap_or("all"),
+                    e.accept_client_events_from.as_deref().unwrap_or("members"),
                 ),
                 rate_limiting: match rl {
                     Some(rl) => RateLimiting {
@@ -610,22 +638,46 @@ fn application_from_file(e: AppFileEntry) -> Arc<Application> {
 
 /// Assemble a Redis URL from the same variables Reverb's scaling block reads.
 fn redis_url() -> String {
-    if let Some(url) = env("REDIS_URL") {
-        return url;
+    match env("REDIS_URL") {
+        Some(url) => url,
+        None => compose_redis_url(
+            env("REDIS_SCHEME").as_deref(),
+            &env_or("REDIS_HOST", "127.0.0.1"),
+            &env_or("REDIS_PORT", "6379"),
+            &env_or("REDIS_DB", "0"),
+            env("REDIS_USERNAME").as_deref(),
+            env("REDIS_PASSWORD").as_deref(),
+        ),
     }
+}
 
-    let host = env_or("REDIS_HOST", "127.0.0.1");
-    let port = env_or("REDIS_PORT", "6379");
-    let db = env_or("REDIS_DB", "0");
-    let username = env("REDIS_USERNAME").unwrap_or_default();
-    let password = env("REDIS_PASSWORD");
+/// Build a Redis URL, percent-encoding the credentials so a password holding
+/// `@`, `/` or `:` cannot change the host it points at. Laravel's
+/// `scheme => tls` selects `rediss://`, as the exported config does.
+fn compose_redis_url(
+    scheme: Option<&str>,
+    host: &str,
+    port: &str,
+    db: &str,
+    username: Option<&str>,
+    password: Option<&str>,
+) -> String {
+    use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 
-    let auth = match password {
-        Some(pass) => format!("{username}:{pass}@"),
-        None => String::new(),
+    let encode = |value: &str| utf8_percent_encode(value, NON_ALPHANUMERIC).to_string();
+
+    let scheme = match scheme {
+        Some("tls" | "rediss") => "rediss",
+        _ => "redis",
     };
 
-    format!("redis://{auth}{host}:{port}/{db}")
+    let auth = match (username, password) {
+        (user, Some(pass)) => format!("{}:{}@", encode(user.unwrap_or_default()), encode(pass)),
+        (Some(user), None) => format!("{}@", encode(user)),
+        (None, None) => String::new(),
+    };
+
+    format!("{scheme}://{auth}{host}:{port}/{db}")
 }
 
 /// Normalize the route prefix to either `""` or `"/segment"` with no trailing slash.
@@ -687,6 +739,35 @@ mod tests {
 
         assert_eq!(resolved.map(|tls| tls.cert), Some(certs.join("reverb.test.crt")));
         assert!(missing.is_none());
+    }
+
+    #[test]
+    fn encodes_redis_credentials() {
+        let url = compose_redis_url(None, "redis", "6379", "0", None, Some("p@ss/w:rd#1"));
+
+        assert_eq!(url, "redis://:p%40ss%2Fw%3Ard%231@redis:6379/0");
+        assert_eq!(
+            redis::Client::open(url.as_str())
+                .expect("parses")
+                .get_connection_info()
+                .addr
+                .to_string(),
+            "redis:6379"
+        );
+
+        assert_eq!(
+            compose_redis_url(Some("tls"), "h", "6380", "2", Some("user"), None),
+            "rediss://user@h:6380/2"
+        );
+        assert_eq!(compose_redis_url(None, "h", "1", "0", None, None), "redis://h:1/0");
+    }
+
+    #[test]
+    fn defaults_an_exported_app_to_members_only_client_events() {
+        let entry: AppFileEntry =
+            serde_json::from_str(r#"{ "app_id": "1", "key": "k", "secret": "s" }"#).unwrap();
+
+        assert_eq!(application_from_file(entry).accept_client_events_from, ClientEvents::Members);
     }
 
     #[test]

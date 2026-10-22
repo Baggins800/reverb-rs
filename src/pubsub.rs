@@ -8,7 +8,14 @@
 //!
 //! The envelope mirrors Reverb's (`type`, `payload`, `socket_id`) but carries
 //! the application as its ID rather than a PHP-serialized object, so a cluster
-//! must be all-Rust or all-PHP, not a mix of both.
+//! must be all-Rust or all-PHP, not a mix of both. Messages also carry the
+//! publishing node's ID: a node delivers to its own clients before publishing
+//! and ignores its echo, where Reverb waits for the echo to deliver at all.
+//!
+//! Presence is per node, as in Reverb: each node announces `member_added`
+//! and `member_removed` for the connections it holds, so a user connected to
+//! two nodes is announced by both and removed by whichever they leave first.
+//! The roster endpoints gather from every node and are exact.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,6 +36,8 @@ use crate::server::Server;
 const METRICS_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct PubSub {
+    /// Identifies this node's own messages when Redis echoes them back.
+    node: String,
     channel: String,
     manager: redis::aio::ConnectionManager,
     outbound: mpsc::Sender<String>,
@@ -45,6 +54,7 @@ impl PubSub {
         let (tx, rx) = mpsc::channel(8192);
 
         let pubsub = Arc::new(Self {
+            node: correlation_key(),
             channel: channel.clone(),
             manager: manager.clone(),
             outbound: tx,
@@ -57,7 +67,8 @@ impl PubSub {
         Ok(pubsub)
     }
 
-    /// Broadcast a payload to the cluster and apply it locally.
+    /// Broadcast a payload to the other nodes; the caller has already
+    /// delivered it here.
     ///
     /// Publishing is fire-and-forget so a Redis stall never blocks a client's
     /// message loop.
@@ -69,6 +80,7 @@ impl PubSub {
     ) {
         let mut envelope = json!({
             "type": "message",
+            "node": self.node,
             "application": app.id,
             "payload": Value::Object(payload),
         });
@@ -240,6 +252,11 @@ async fn handle_envelope(raw: &str, server: &Arc<Server>, pubsub: &Arc<PubSub>) 
 
     match kind {
         "message" => {
+            // Already delivered here before it was published.
+            if envelope.get("node").and_then(Value::as_str) == Some(pubsub.node.as_str()) {
+                return Ok(());
+            }
+
             let Some(app) = resolve_app(server, &envelope) else { return Ok(()) };
 
             if let Some(Value::Object(payload)) = envelope.get("payload") {

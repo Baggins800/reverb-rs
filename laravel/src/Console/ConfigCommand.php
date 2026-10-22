@@ -51,6 +51,14 @@ class ConfigCommand extends Command
                 'redis_url' => $this->redisUrl($server['scaling']['server'] ?? []),
             ],
             'restart' => $this->restart($config),
+            // The connection reverb-rs:relay subscribes on, so the server
+            // publishes where the relay is listening.
+            'events' => [
+                'redis_url' => $this->redisUrl($config->get(
+                    'database.redis.'.($config->get('reverb-rs.connection') ?: 'default'),
+                    []
+                )),
+            ],
             // Resolved through the configured provider, so a custom one that
             // reads applications from a database is exported like any other.
             'apps' => $applications->all()
@@ -101,19 +109,35 @@ class ConfigCommand extends Command
                 'driver' => 'file',
                 'path' => $config->get("cache.stores.{$store}.path"),
             ],
-            'redis' => [
-                'driver' => 'redis',
-                // Laravel's Redis cache store appends a colon to the prefix.
-                'prefix' => ($p = $config->get('cache.prefix')) ? $p.':' : '',
-                'redis_url' => $this->redisUrl($config->get(
-                    'database.redis.'.($config->get("cache.stores.{$store}.connection") ?: 'cache'),
-                    $config->get('database.redis.default', [])
-                )),
-            ],
+            'redis' => $this->redisRestart($config, $store),
             // Database and memcached stores are not readable from here; the
             // server falls back to stopping on a signal.
             default => ['driver' => (string) $driver],
         };
+    }
+
+    /**
+     * The Redis key reverb:restart writes through a Redis cache store.
+     *
+     * Two prefixes stack: the cache store's, which Laravel's RedisStore
+     * follows with a colon, and the connection's own `options.prefix`, which
+     * the Redis client prepends to every key it touches.
+     *
+     * @return array<string, mixed>
+     */
+    protected function redisRestart(Repository $config, string $store): array
+    {
+        $name = $config->get("cache.stores.{$store}.connection") ?: 'cache';
+        $connection = $config->get("database.redis.{$name}", $config->get('database.redis.default', []));
+
+        $storePrefix = $config->get("cache.stores.{$store}.prefix", $config->get('cache.prefix'));
+        $clientPrefix = $connection['options']['prefix'] ?? $config->get('database.redis.options.prefix', '');
+
+        return [
+            'driver' => 'redis',
+            'prefix' => $clientPrefix.($storePrefix ? $storePrefix.':' : ''),
+            'redis_url' => $this->redisUrl($connection),
+        ];
     }
 
     /**

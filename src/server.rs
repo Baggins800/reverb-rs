@@ -8,15 +8,20 @@ use hmac::{Hmac, Mac};
 use serde_json::{Map, Value, json};
 use sha2::Sha256;
 
-use crate::channel::{Channel, ChannelKind, Member};
+use crate::channel::{Channel, ChannelKind};
 use crate::config::{Application, ClientEvents, ServerConfig};
 use crate::conn::Conn;
-use crate::events::Telemetry;
+use crate::events::{EventKind, Telemetry};
 use crate::protocol::{self, PusherError};
 use crate::pubsub::PubSub;
 use crate::registry::{AppRegistry, Registry};
 
 pub type HmacSha256 = Hmac<Sha256>;
+
+/// The longest channel name accepted, in bytes. Pusher's own limit; Reverb
+/// sets none, which lets one subscribe frame name a channel as large as the
+/// message size allows.
+pub const MAX_CHANNEL_NAME_LENGTH: usize = 164;
 
 /// Shared server state: configuration, the application catalogue and the
 /// channel registry.
@@ -70,20 +75,23 @@ impl Server {
     /// Handle a newly upgraded connection: enforce quotas and origin rules,
     /// then acknowledge it.
     ///
-    /// Reverb reports these failures without closing the socket, and this does
-    /// the same so misbehaving clients see identical behaviour.
+    /// A refused connection is sent the same error Reverb sends, then closed.
+    /// Reverb leaves it open, and a client that ignores the error can go on
+    /// subscribing and whispering as if the check had passed.
     pub fn open(&self, conn: &Arc<Conn>) {
         let registry = self.app_registry(&conn.app);
 
-        if let Some(limit) = conn.app.max_connections
-            && registry.socket_count() > limit
-        {
-            conn.send_error(PusherError::ConnectionLimitExceeded);
-            return;
-        }
+        let refusal = if conn.app.max_connections.is_some_and(|l| registry.socket_count() > l) {
+            Some(PusherError::ConnectionLimitExceeded)
+        } else if !conn.app.origin_allowed(conn.origin.as_deref()) {
+            Some(PusherError::InvalidOrigin)
+        } else {
+            None
+        };
 
-        if !conn.app.origin_allowed(conn.origin.as_deref()) {
-            conn.send_error(PusherError::InvalidOrigin);
+        if let Some(error) = refusal {
+            conn.send_error(error);
+            conn.terminate();
             return;
         }
 
@@ -101,14 +109,23 @@ impl Server {
 
     /// Handle a text frame from a client.
     pub fn message(&self, conn: &Arc<Conn>, message: &str) {
+        // A connection on its way out — refused, terminated or fallen behind —
+        // has nothing more to say, however much it keeps sending.
+        if conn.is_closed() {
+            return;
+        }
+
         conn.touch();
 
         if !conn.check_rate_limit() {
+            // The error is queued first so it reaches the client ahead of the
+            // close; once terminated, nothing more can be queued.
+            conn.send_error(PusherError::RateLimitExceeded);
+
             if conn.app.rate_limiting.terminate_on_limit {
                 conn.terminate();
             }
 
-            conn.send_error(PusherError::RateLimitExceeded);
             return;
         }
 
@@ -216,6 +233,16 @@ impl Server {
     ) -> Result<(), PusherError> {
         let kind = ChannelKind::of(name);
 
+        if name.is_empty() || name.len() > MAX_CHANNEL_NAME_LENGTH {
+            return Err(PusherError::InvalidChannelName);
+        }
+
+        if !conn.is_tracking(name)
+            && conn.channel_count() >= self.config.max_channels_per_connection
+        {
+            return Err(PusherError::SubscriptionLimitExceeded);
+        }
+
         if kind.requires_auth() {
             self.verify_subscription(conn, name, auth, data)?;
         }
@@ -230,27 +257,29 @@ impl Server {
         };
 
         let registry = self.app_registry(&conn.app);
-        let channel = registry.find_or_create(name);
 
-        let user_id = if kind.is_presence() {
-            parsed
-                .get("user_id")
-                .and_then(crate::channel::Member::key_of)
-                .map(|id| (id, parsed.get("user_id").cloned().unwrap_or(Value::Null)))
-        } else {
-            None
+        let channel = loop {
+            let channel = registry.find_or_create(name);
+            let announcing = channel.announcing();
+
+            let first = channel.subscribe(conn.clone(), parsed.clone());
+
+            // The channel emptied and was removed between the lookup and the
+            // join, so this membership is in a channel nobody can reach.
+            // Leave it and join whichever channel now holds the name.
+            if !registry.holds(&channel) {
+                channel.unsubscribe(&conn.id);
+                continue;
+            }
+
+            if kind.is_presence() && first {
+                self.announce_member_added(conn, &channel, &parsed);
+            }
+
+            drop(announcing);
+
+            break channel;
         };
-
-        // Whether this user was already present decides if a `member_added` is
-        // announced, and must be read before the new membership is recorded.
-        let already_present =
-            user_id.as_ref().is_some_and(|(id, _)| channel.user_is_subscribed(id, None));
-
-        channel.subscribe(conn.clone(), parsed.clone());
-
-        if kind.is_presence() && !already_present {
-            self.announce_member_added(conn, &channel, &parsed);
-        }
 
         self.send_subscription_succeeded(conn, &channel);
 
@@ -282,6 +311,17 @@ impl Server {
             _ => json!({}),
         };
 
+        self.telemetry.emit(
+            EventKind::MemberAdded,
+            &conn.app.id,
+            json!({
+                "channel": channel.name,
+                "socket_id": conn.id,
+                "user_id": data.get("user_id").cloned().unwrap_or(Value::Null),
+                "user_info": data.get("user_info").cloned().unwrap_or(Value::Null),
+            }),
+        );
+
         self.dispatch(
             &conn.app,
             payload_map([
@@ -296,37 +336,31 @@ impl Server {
     pub fn unsubscribe(&self, conn: &Arc<Conn>, name: &str) {
         let registry = self.app_registry(&conn.app);
 
-        let Some(channel) = registry.find(name) else {
-            return;
-        };
-
-        let Some(member) = channel.unsubscribe(&conn.id) else {
-            return;
-        };
-
-        if channel.is_empty() {
-            registry.remove_channel(name);
+        if let Some(channel) = registry.find(name) {
+            self.leave(conn, &registry, &channel);
         }
-
-        self.after_unsubscribe(conn, &channel, &member);
     }
 
-    /// Announce a departing presence member once their last connection to the
-    /// channel has gone.
-    fn after_unsubscribe(&self, conn: &Arc<Conn>, channel: &Channel, member: &Member) {
-        if !channel.kind.is_presence() {
-            return;
-        }
+    /// Remove a connection from one channel, announcing a departing presence
+    /// member once their last connection to it has gone.
+    fn leave(&self, conn: &Arc<Conn>, registry: &AppRegistry, channel: &Channel) {
+        let _announcing = channel.announcing();
 
-        let Some(user_id) = member.user_id() else {
+        let Some((member, last)) = registry.leave(channel, &conn.id) else {
             return;
         };
 
-        if channel.user_is_subscribed(&user_id, None) {
+        if !channel.kind.is_presence() || !last || member.user_id().is_none() {
             return;
         }
 
         let raw = member.data.get("user_id").cloned().unwrap_or(Value::Null);
+
+        self.telemetry.emit(
+            EventKind::MemberRemoved,
+            &conn.app.id,
+            json!({ "channel": channel.name, "socket_id": conn.id, "user_id": raw }),
+        );
 
         self.dispatch(
             &conn.app,
@@ -343,8 +377,8 @@ impl Server {
     pub fn close(&self, conn: &Arc<Conn>) {
         let registry = self.app_registry(&conn.app);
 
-        for (channel, member) in registry.unsubscribe_from_all(&conn.id) {
-            self.after_unsubscribe(conn, &channel, &member);
+        for channel in registry.channels_of(conn) {
+            self.leave(conn, &registry, &channel);
         }
 
         registry.remove_socket(&conn.id);
@@ -409,35 +443,34 @@ impl Server {
             return Ok(());
         }
 
-        let rebroadcast = if policy == ClientEvents::Members {
-            let member = self
-                .app_registry(&conn.app)
-                .find(channel_name)
-                .and_then(|channel| channel.find(&conn.id));
+        let member = self
+            .app_registry(&conn.app)
+            .find(channel_name)
+            .and_then(|channel| channel.find(&conn.id));
 
-            let Some(member) = member else {
-                conn.send_error(PusherError::NotAChannelMember);
-                return Ok(());
-            };
+        if policy == ClientEvents::Members && member.is_none() {
+            conn.send_error(PusherError::NotAChannelMember);
+            return Ok(());
+        }
 
-            // Rebuild the payload so only the expected members survive, plus
-            // the authenticated user ID where we have one.
-            let mut rebuilt = payload_map([
-                ("event", json!(name)),
-                ("channel", json!(channel_name)),
-                ("data", event.get("data").cloned().unwrap_or(Value::Null)),
-            ]);
+        // Rebuild the payload so only the expected members survive, plus the
+        // authenticated user ID where we have one. Reverb does this only for
+        // `members` and forwards anything else verbatim, which lets a client
+        // pick its own `user_id` or fan out to a `channels` list of its
+        // choosing; here the one named channel is all a whisper ever reaches.
+        let mut rebroadcast = payload_map([
+            ("event", json!(name)),
+            ("channel", json!(channel_name)),
+            ("data", event.get("data").cloned().unwrap_or(Value::Null)),
+        ]);
 
-            // Public channels allow unauthenticated users, so there may be
-            // no user ID to attach.
-            if let Some(user_id) = member.data.get("user_id").filter(|id| !id.is_null()) {
-                rebuilt.insert("user_id".into(), user_id.clone());
-            }
-
-            rebuilt
-        } else {
-            event.clone()
-        };
+        // Public channels allow unauthenticated users, so there may be no
+        // user ID to attach.
+        if let Some(user_id) =
+            member.as_ref().and_then(|m| m.data.get("user_id")).filter(|id| !id.is_null())
+        {
+            rebroadcast.insert("user_id".into(), user_id.clone());
+        }
 
         self.dispatch(&conn.app, rebroadcast, Some(&conn.id));
 
@@ -446,16 +479,22 @@ impl Server {
 
     // -- Fan-out --------------------------------------------------------------
 
-    /// Publish a payload to its channels, across the cluster when scaling is on.
+    /// Deliver a payload to its channels here, then to the rest of the
+    /// cluster when scaling is on.
+    ///
+    /// Reverb publishes and waits for its own echo before delivering locally,
+    /// so a Redis outage silences even clients on the same node. Delivering
+    /// first keeps a node working on its own; peers skip the echo.
     pub fn dispatch(
         &self,
         app: &Arc<Application>,
         payload: Map<String, Value>,
         except: Option<&str>,
     ) {
-        match self.pubsub() {
-            Some(pubsub) => pubsub.publish_message(app, payload, except),
-            None => self.dispatch_locally(app, &payload, except),
+        self.dispatch_locally(app, &payload, except);
+
+        if let Some(pubsub) = self.pubsub() {
+            pubsub.publish_message(app, payload, except);
         }
     }
 

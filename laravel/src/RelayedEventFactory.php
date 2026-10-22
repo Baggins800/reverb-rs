@@ -11,13 +11,16 @@ use Laravel\Reverb\Events\MessageSent;
 use Laravel\Reverb\Exceptions\InvalidApplication;
 use Laravel\Reverb\Protocols\Pusher\Channels\ChannelBroker;
 use Laravel\Reverb\Protocols\Pusher\Channels\ChannelConnection;
+use ReverbRs\Events\MemberAdded;
+use ReverbRs\Events\MemberRemoved;
 use ReverbRs\Support\RelayedConnection;
 
 /**
  * Rebuilds Laravel Reverb's own event objects from the JSON reverb-rs relays.
  *
  * The events are the real classes, so existing listeners, Pulse recorders and
- * Telescope see exactly what they would have seen from the PHP server.
+ * Telescope see exactly what they would have seen from the PHP server. The two
+ * presence events have no Reverb counterpart and are this package's own.
  */
 class RelayedEventFactory
 {
@@ -68,8 +71,29 @@ class RelayedEventFactory
                     (array) ($payload['data'] ?? []),
                 ),
             ),
+            'member_added' => new MemberAdded(
+                (string) ($payload['channel'] ?? ''),
+                (string) ($payload['socket_id'] ?? ''),
+                $this->userId($payload),
+                is_array($payload['user_info'] ?? null) ? $payload['user_info'] : null,
+            ),
+            'member_removed' => new MemberRemoved(
+                (string) ($payload['channel'] ?? ''),
+                (string) ($payload['socket_id'] ?? ''),
+                $this->userId($payload),
+            ),
             default => null,
         };
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     */
+    protected function userId(array $payload): string|int|null
+    {
+        $id = $payload['user_id'] ?? null;
+
+        return is_string($id) || is_int($id) ? $id : null;
     }
 
     /**

@@ -351,6 +351,9 @@ worth leaving alone unless you are measuring:
 | `REVERB_SEND_QUEUE_DEPTH` | Frames a slow client may fall behind before being disconnected. Default 1024. |
 | `REVERB_LISTEN_BACKLOG` | `listen(2)` queue depth. Default 4096; too small costs reconnecting clients a one-second SYN retransmit. |
 | `REVERB_MAINTENANCE_INTERVAL` | Seconds between ping/prune sweeps. Default 60, matching Reverb. |
+| `REVERB_MAX_CHANNELS_PER_CONNECTION` | Channels one connection may join. Default 100. |
+| `REVERB_EVENTS_QUEUE_BYTES` | Bytes of message frames the event relay may hold while Redis catches up. Default 64 MiB. |
+| `REVERB_EVENTS_MESSAGE_BODIES` | Set `false` to relay message events without the frame itself, so payloads are never copied into Redis. Default `true`. |
 | `REVERB_SERVER_TLS_CERT` / `_KEY` | Terminate TLS in the server. |
 | `REVERB_APP_ALLOWED_ORIGINS` | Comma-separated origin allow-list. |
 
@@ -376,6 +379,12 @@ The Pulse **Connections** card needs nothing at all: `ReverbConnections` runs in
 `pulse:check`, not inside the server, and reads `GET /apps/{id}/connections` over HTTP — which
 `reverb-rs` serves identically. Only the **Messages** card needs the relay.
 
+Two more events, `member_added` and `member_removed`, have no Reverb counterpart. They fire once
+per user joining or leaving a presence channel, whoever else is subscribed, so a listener can
+track presence without inferring it from frames sent to other clients. They are on by default
+with the other lifecycle events, and the package dispatches them as
+`ReverbRs\Events\MemberAdded` and `MemberRemoved`.
+
 `message_sent` and `message_received` fire once per delivered frame, so they are counted always
 and relayed only when asked for. Measured at 1000 subscribers:
 
@@ -386,8 +395,12 @@ and relayed only when asked for. Measured at 1000 subscribers:
 | `all`, sample rate 1 | 1,263k msg/s | 43%, Redis could not keep up |
 | `all`, sample rate 0.05 | 1,459k msg/s | none |
 
-The relay sheds load rather than slowing the server: on a saturated queue it drops events, warns
-once, and reports the total as `events_dropped` on `GET /apps/{id}/counters`. Watch that counter
+The relay sheds load rather than slowing the server: message events have their own budget in the
+queue (`REVERB_EVENTS_QUEUE_DEPTH` events and `REVERB_EVENTS_QUEUE_BYTES` bytes), and beyond it
+they are dropped, with a warning at most every ten seconds and the total reported as
+`events_dropped` on `GET /apps/{id}/counters`. Lifecycle and presence events have reserved room
+and stay in order with the messages around them. A batch Redis refuses is retried twice before
+it is given up, and whatever is queued at shutdown is published before the process exits. Watch that counter
 after turning message events on, and lower `REVERB_EVENTS_SAMPLE_RATE` if it climbs. At a few
 thousand frames a second none of this applies — everything is relayed exactly.
 
@@ -439,6 +452,26 @@ Where behaviour diverges on purpose rather than by omission:
 5. **A client that cannot keep up is disconnected.** Each connection has a bounded outbound queue
    (`REVERB_SEND_QUEUE_DEPTH`, 1024 frames). Overflowing it closes the connection rather than
    buffering without limit, which is what lets one stalled subscriber take down a PHP node.
+
+6. **A whisper reaches the one channel it names, whatever the policy.** Under
+   `accept_client_events_from: all`, Reverb forwards the client's frame verbatim, so a socket
+   that never subscribed can add `"channels": [...]` to fan out to any channels it likes, and a
+   `user_id` of its choosing. `reverb-rs` rebuilds the frame under every policy, as Reverb does
+   only for `members`. An exported app that omits the key defaults to `members`, the stock
+   `config/reverb.php` value, rather than Reverb's provider fallback of `all`.
+
+7. **A connection refused for its origin or the connection quota is closed.** Reverb sends the
+   4009 or 4004 error and leaves the socket open and usable, so neither setting limits anything.
+   `reverb-rs` sends the same error, then closes.
+
+8. **Subscriptions are bounded.** Channel names longer than 164 bytes (Pusher's limit) are
+   refused with 4200, and one connection may hold at most `REVERB_MAX_CHANNELS_PER_CONNECTION`
+   channels (default 100); one more is refused with 4301. Reverb has neither limit.
+
+9. **A scaled node delivers to its own clients before publishing.** Reverb publishes and delivers
+   only when Redis echoes the message back, so a Redis outage silences every client, including
+   those on the node that received the event. Presence is still per node, as in Reverb: a user
+   connected to two nodes is announced by both.
 
 ## Tests
 

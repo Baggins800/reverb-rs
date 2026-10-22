@@ -14,7 +14,7 @@ use serde_json::json;
 use support::*;
 
 /// Drain whatever has been relayed so far.
-fn drain(rx: &mut tokio::sync::mpsc::Receiver<RelayedEvent>) -> Vec<RelayedEvent> {
+fn drain(rx: &mut reverb_rs::events::RelayReceiver) -> Vec<RelayedEvent> {
     let mut events = Vec::new();
 
     while let Ok(event) = rx.try_recv() {
@@ -22,6 +22,21 @@ fn drain(rx: &mut tokio::sync::mpsc::Receiver<RelayedEvent>) -> Vec<RelayedEvent
     }
 
     events
+}
+
+/// Wait for the next event of `kind`, discarding others.
+async fn wait_for(rx: &mut reverb_rs::events::RelayReceiver, kind: EventKind) -> RelayedEvent {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let event = rx.recv().await.expect("the relay is open");
+
+            if event.kind == kind {
+                return event;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for a relayed event")
 }
 
 fn kinds(events: &[RelayedEvent]) -> Vec<EventKind> {
@@ -183,7 +198,43 @@ mod wire_contract {
                 "channel_created",
                 "channel_removed",
                 "connection_pruned",
+                "member_added",
+                "member_removed",
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn presence_events_report_the_channel_socket_and_user() {
+        let (server, mut rx) = start_with_events(
+            application(),
+            EventSet::of([EventKind::MemberAdded, EventKind::MemberRemoved]),
+        )
+        .await;
+
+        let (mut socket, id) = server.connect().await;
+        let data = json!({ "user_id": 5, "user_info": { "name": "Five" } });
+        subscribe_with_data(&mut socket, &id, "presence-test", Some(data)).await;
+
+        let added = wait_for(&mut rx, EventKind::MemberAdded).await;
+
+        assert_eq!(
+            added.to_json()["payload"],
+            json!({
+                "channel": "presence-test",
+                "socket_id": id,
+                "user_id": 5,
+                "user_info": { "name": "Five" },
+            })
+        );
+
+        drop(socket);
+
+        let removed = wait_for(&mut rx, EventKind::MemberRemoved).await;
+
+        assert_eq!(
+            removed.to_json()["payload"],
+            json!({ "channel": "presence-test", "socket_id": id, "user_id": 5 })
         );
     }
 
@@ -240,4 +291,69 @@ mod wire_contract {
         assert_eq!(body["socket_id"], id);
         assert_eq!(body["data"], json!({ "user_id": 5 }));
     }
+}
+
+/// What is still queued when the server stops reaches Redis before the relay
+/// exits. Skipped unless `REVERB_TEST_REDIS_URL` is set.
+#[tokio::test]
+async fn publishes_what_is_queued_when_shutting_down() {
+    use futures_util::StreamExt;
+
+    let Ok(url) = std::env::var("REVERB_TEST_REDIS_URL") else {
+        eprintln!("skipped: REVERB_TEST_REDIS_URL is not set");
+        return;
+    };
+
+    let channel = format!("reverb-test-drain-{}", unix_time());
+    let client = redis::Client::open(url.as_str()).expect("redis client");
+
+    let mut subscriber = client.get_async_pubsub().await.expect("subscriber");
+    subscriber.subscribe(&channel).await.expect("subscribe");
+
+    let manager = redis::aio::ConnectionManager::new(client).await.expect("publisher");
+    let (telemetry, rx) = reverb_rs::events::Telemetry::relayed(
+        reverb_rs::events::RelayOptions::new(EventSet::of(EventKind::LIFECYCLE)),
+    );
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+
+    // A flush interval far longer than the test, so only the shutdown drain
+    // can be what publishes.
+    let relay = tokio::spawn(reverb_rs::events::relay_loop(
+        rx,
+        manager,
+        channel.clone(),
+        500,
+        std::time::Duration::from_secs(60),
+        async move {
+            let _ = stopped.await;
+        },
+    ));
+
+    telemetry.emit_channel(EventKind::ChannelRemoved, "app", "presence-servers.1");
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    telemetry.emit_channel(EventKind::ChannelRemoved, "app", "presence-servers.2");
+
+    let _ = stop.send(());
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), relay)
+        .await
+        .expect("the relay exits promptly")
+        .expect("the relay does not panic");
+
+    let message =
+        tokio::time::timeout(std::time::Duration::from_secs(2), subscriber.on_message().next())
+            .await
+            .expect("a batch was published")
+            .expect("message");
+
+    let batch: serde_json::Value =
+        serde_json::from_str(&message.get_payload::<String>().unwrap()).unwrap();
+    let channels: Vec<&str> = batch
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["payload"]["channel"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(channels, vec!["presence-servers.1", "presence-servers.2"]);
 }

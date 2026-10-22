@@ -1,12 +1,13 @@
 //! A live WebSocket connection and the state the protocol keeps about it.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 use axum::extract::ws::Utf8Bytes;
 use parking_lot::Mutex;
 use rand::Rng;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
 use crate::config::Application;
 use crate::events::{AppCounters, EventKind, Telemetry};
@@ -57,6 +58,11 @@ pub struct Conn {
     has_been_pinged: AtomicBool,
     uses_control_frames: AtomicBool,
     closed: AtomicBool,
+    /// Wakes the writer when a close cannot be queued behind a full queue.
+    abort: Notify,
+    /// The names of the channels this connection has joined, so leaving them
+    /// costs its own subscriptions rather than a walk of every channel.
+    channels: Mutex<HashSet<String>>,
     /// Frames dropped because the client could not keep up.
     dropped: AtomicU64,
     limiter: Mutex<RateWindow>,
@@ -83,6 +89,8 @@ impl Conn {
             has_been_pinged: AtomicBool::new(false),
             uses_control_frames: AtomicBool::new(false),
             closed: AtomicBool::new(false),
+            abort: Notify::new(),
+            channels: Mutex::new(HashSet::new()),
             dropped: AtomicU64::new(0),
             limiter: Mutex::new(RateWindow { count: 0, started_at: now() }),
             telemetry,
@@ -103,34 +111,26 @@ impl Conn {
         // Reverb dispatches `MessageSent` from exactly this point.
         self.counters.record_sent(1);
 
-        if self.telemetry.forwards(EventKind::MessageSent) {
-            self.telemetry.emit(
-                EventKind::MessageSent,
-                &self.app.id,
-                serde_json::json!({
-                    "socket_id": self.id,
-                    "origin": self.origin,
-                    "message": message.as_str(),
-                }),
-            );
-        }
+        self.telemetry.emit_message(
+            EventKind::MessageSent,
+            &self.app.id,
+            &self.id,
+            self.origin.as_deref(),
+            message.as_str(),
+        );
     }
 
     /// Record a frame accepted from the client, as Reverb's `MessageReceived`.
     pub fn record_received(&self, message: &str) {
         self.counters.record_received();
 
-        if self.telemetry.forwards(EventKind::MessageReceived) {
-            self.telemetry.emit(
-                EventKind::MessageReceived,
-                &self.app.id,
-                serde_json::json!({
-                    "socket_id": self.id,
-                    "origin": self.origin,
-                    "message": message,
-                }),
-            );
-        }
+        self.telemetry.emit_message(
+            EventKind::MessageReceived,
+            &self.app.id,
+            &self.id,
+            self.origin.as_deref(),
+            message,
+        );
     }
 
     pub fn send_error(&self, error: PusherError) {
@@ -162,16 +162,50 @@ impl Conn {
     }
 
     /// Ask the writer task to close the socket.
+    ///
+    /// The close is normally queued, so frames already ahead of it — an error
+    /// explaining why — still reach the client. When the queue is full that
+    /// is impossible, and the writer is woken directly instead.
     pub fn terminate(&self) {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
         }
 
-        let _ = self.tx.try_send(Outbound::Close);
+        if self.tx.try_send(Outbound::Close).is_err() {
+            self.abort.notify_one();
+        }
+    }
+
+    /// Resolves once the connection must close without draining its queue.
+    pub async fn aborted(&self) {
+        self.abort.notified().await;
     }
 
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Relaxed)
+    }
+
+    /// Record that this connection joined `channel`.
+    pub fn track(&self, channel: &str) {
+        self.channels.lock().insert(channel.to_string());
+    }
+
+    /// Record that this connection left `channel`.
+    pub fn untrack(&self, channel: &str) {
+        self.channels.lock().remove(channel);
+    }
+
+    pub fn is_tracking(&self, channel: &str) -> bool {
+        self.channels.lock().contains(channel)
+    }
+
+    /// The names of the channels this connection belongs to.
+    pub fn channel_names(&self) -> Vec<String> {
+        self.channels.lock().iter().cloned().collect()
+    }
+
+    pub fn channel_count(&self) -> usize {
+        self.channels.lock().len()
     }
 
     pub fn dropped_frames(&self) -> u64 {
@@ -301,8 +335,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn disconnects_a_client_that_falls_behind() {
+    #[tokio::test]
+    async fn disconnects_a_client_that_falls_behind() {
         let (tx, rx) = mpsc::channel(2);
         let conn =
             Conn::new(app(RateLimiting::default()), None, tx, Arc::new(Telemetry::disabled()));
@@ -313,7 +347,32 @@ mod tests {
 
         assert!(conn.is_closed());
         assert_eq!(conn.dropped_frames(), 1);
+
+        // The close could not be queued behind the backlog, so the writer
+        // must be woken some other way or the socket would never close.
+        tokio::time::timeout(std::time::Duration::from_secs(1), conn.aborted())
+            .await
+            .expect("the writer is told to close");
+
         drop(rx);
+    }
+
+    #[tokio::test]
+    async fn queues_an_ordinary_close_behind_pending_frames() {
+        let (conn, mut rx) = conn(RateLimiting::default());
+
+        conn.send("goodbye");
+        conn.terminate();
+
+        assert!(
+            matches!(rx.recv().await, Some(Outbound::Text(text)) if text.as_str() == "goodbye")
+        );
+        assert!(matches!(rx.recv().await, Some(Outbound::Close)));
+
+        let aborted =
+            tokio::time::timeout(std::time::Duration::from_millis(50), conn.aborted()).await;
+
+        assert!(aborted.is_err(), "a queued close must not skip the frames ahead of it");
     }
 
     #[test]

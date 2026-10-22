@@ -14,7 +14,7 @@ use sha1::{Digest, Sha1};
 pub const RESTART_KEY: &str = "laravel:reverb:restart";
 
 /// Where to look for the restart signal.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub enum RestartWatch {
     /// Not watching; stop the server with a signal instead.
     #[default]
@@ -23,6 +23,34 @@ pub enum RestartWatch {
     File { path: PathBuf },
     /// Laravel's Redis cache store.
     Redis { url: String, key: String },
+}
+
+/// Written by hand so logging a watch never prints the Redis password.
+impl std::fmt::Debug for RestartWatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Off => f.write_str("Off"),
+            Self::File { path } => f.debug_struct("File").field("path", path).finish(),
+            Self::Redis { url, key } => {
+                f.debug_struct("Redis").field("url", &redact(url)).field("key", key).finish()
+            }
+        }
+    }
+}
+
+/// A Redis URL with any password replaced by `***`.
+fn redact(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+
+    match rest.rsplit_once('@') {
+        Some((userinfo, host)) => match userinfo.split_once(':') {
+            Some((user, _)) => format!("{scheme}://{user}:***@{host}"),
+            None => url.to_string(),
+        },
+        None => url.to_string(),
+    }
 }
 
 impl RestartWatch {
@@ -130,6 +158,18 @@ mod tests {
                 key: "laravel_cache_:laravel:reverb:restart".into(),
             }
         );
+    }
+
+    #[test]
+    fn keeps_the_redis_password_out_of_debug_output() {
+        let watch = RestartWatch::redis("redis://user:hunter2@cache:6379/1", "", RESTART_KEY);
+        let printed = format!("{watch:?}");
+
+        assert!(!printed.contains("hunter2"), "{printed}");
+        assert!(printed.contains("redis://user:***@cache:6379/1"), "{printed}");
+
+        let anonymous = RestartWatch::redis("redis://cache:6379", "", RESTART_KEY);
+        assert!(format!("{anonymous:?}").contains("redis://cache:6379"));
     }
 
     #[tokio::test]

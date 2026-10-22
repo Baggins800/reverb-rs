@@ -91,9 +91,8 @@ fn prune_stale_connections(server: &Arc<Server>) {
             let data = server
                 .registry
                 .for_app(&app.id)
-                .subscribed_connections()
-                .get(&conn.id)
-                .map(|member| member.data.clone())
+                .membership_of(&conn)
+                .map(|member| member.data)
                 .unwrap_or(serde_json::Value::Null);
 
             server.close(&conn);

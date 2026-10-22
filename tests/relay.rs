@@ -212,6 +212,46 @@ async fn relays_every_event_to_laravel() {
 }
 
 #[tokio::test]
+async fn relays_presence_changes_as_this_packages_events() {
+    let Some((redis, php_app)) = environment() else { return };
+
+    let channel = unique_channel("presence");
+    let relay = start_relay(&php_app, &channel, false).await;
+
+    let server = start_with_redis_relay(
+        application(),
+        EventSet::of([EventKind::MemberAdded, EventKind::MemberRemoved]),
+        &redis,
+        &channel,
+    )
+    .await;
+
+    // Alone on the channel: no other subscriber hears the join, yet the
+    // relay does.
+    let (mut socket, id) = server.connect().await;
+    let data = json!({ "user_id": 42, "user_info": { "name": "Forty-two" } });
+    subscribe_with_data(&mut socket, &id, "presence-relay", Some(data)).await;
+
+    relay.wait_for("the join", |seen| seen.iter().any(|v| v["event"] == "MemberAdded")).await;
+
+    let added = &relay.of_kind("MemberAdded")[0];
+    assert_eq!(added["channel"], "presence-relay");
+    assert_eq!(added["socket"], id);
+    assert_eq!(added["user_id"], 42);
+    assert_eq!(added["user_info"], json!({ "name": "Forty-two" }));
+
+    drop(socket);
+
+    relay
+        .wait_for("the departure", |seen| seen.iter().any(|v| v["event"] == "MemberRemoved"))
+        .await;
+
+    let removed = &relay.of_kind("MemberRemoved")[0];
+    assert_eq!(removed["socket"], id);
+    assert_eq!(removed["user_id"], 42);
+}
+
+#[tokio::test]
 async fn rebuilds_each_channel_as_its_reverb_class() {
     let Some((redis, php_app)) = environment() else { return };
 

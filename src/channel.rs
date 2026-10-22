@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use axum::extract::ws::Utf8Bytes;
 use indexmap::IndexMap;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, MutexGuard, RwLock};
 use serde_json::{Map, Value, json};
 
 use crate::conn::Conn;
@@ -97,6 +97,9 @@ pub struct Channel {
     members: RwLock<IndexMap<String, Member>>,
     /// The last payload broadcast to a cache channel.
     cached: RwLock<Option<Value>>,
+    /// Held across a membership change and the presence announcement it
+    /// decides, so announcements go out in the order the changes happened.
+    announcing: Mutex<()>,
 }
 
 impl Channel {
@@ -106,21 +109,61 @@ impl Channel {
             name,
             members: RwLock::new(IndexMap::new()),
             cached: RwLock::new(None),
+            announcing: Mutex::new(()),
         }
     }
 
-    pub fn subscribe(&self, conn: Arc<Conn>, data: Value) {
+    /// Serialise presence bookkeeping on this channel. Hold the guard from the
+    /// membership change until its `member_added` or `member_removed` is sent.
+    pub fn announcing(&self) -> MutexGuard<'_, ()> {
+        self.announcing.lock()
+    }
+
+    /// Add a subscriber, returning whether it is the first connection for its
+    /// user — the moment a presence channel announces `member_added`.
+    ///
+    /// The answer is decided under the same lock as the insert, so two
+    /// connections of one user joining at once cannot both claim it.
+    pub fn subscribe(&self, conn: Arc<Conn>, data: Value) -> bool {
         let subscribed_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
 
-        self.members.write().insert(conn.id.clone(), Member { conn, data, subscribed_at });
+        // Recorded on the connection first, so a teardown racing this join
+        // already knows to visit the channel.
+        conn.track(&self.name);
+
+        let member = Member { conn, data, subscribed_at };
+        let user_id = member.user_id();
+        let mut members = self.members.write();
+
+        let first = match &user_id {
+            Some(id) => !members.values().any(|m| m.user_id().as_ref() == Some(id)),
+            None => true,
+        };
+
+        members.insert(member.conn.id.clone(), member);
+
+        first
     }
 
-    /// Remove a subscriber, returning its membership if it had one.
-    pub fn unsubscribe(&self, socket_id: &str) -> Option<Member> {
-        self.members.write().shift_remove(socket_id)
+    /// Remove a subscriber, returning its membership and whether it was the
+    /// last connection for its user — when `member_removed` is announced.
+    pub fn unsubscribe(&self, socket_id: &str) -> Option<(Member, bool)> {
+        let mut members = self.members.write();
+        let member = members.shift_remove(socket_id)?;
+
+        let last = match member.user_id() {
+            Some(id) => !members.values().any(|m| m.user_id().as_ref() == Some(&id)),
+            None => true,
+        };
+
+        drop(members);
+
+        member.conn.untrack(&self.name);
+
+        Some((member, last))
     }
 
     pub fn find(&self, socket_id: &str) -> Option<Member> {
@@ -137,17 +180,6 @@ impl Channel {
 
     pub fn is_empty(&self) -> bool {
         self.members.read().is_empty()
-    }
-
-    /// Whether any *other* connection is subscribed under the same user ID.
-    pub fn user_is_subscribed(&self, user_id: &str, excluding: Option<&str>) -> bool {
-        self.members.read().values().any(|member| {
-            if Some(member.conn.id.as_str()) == excluding {
-                return false;
-            }
-
-            member.user_id().as_deref() == Some(user_id)
-        })
     }
 
     /// Send a pre-encoded frame to every subscriber, optionally skipping one.
@@ -223,8 +255,8 @@ impl Channel {
         seen.len()
     }
 
-    /// Every connection subscribed under `user_id`, with the time it joined.
-    /// Used to decide which node announces a presence member.
+    /// Every connection subscribed under `user_id`, with the time it joined,
+    /// for the `presence_connections` metric.
     pub fn connections_for_user(&self, user_id: &str) -> Vec<(String, f64)> {
         self.members
             .read()
@@ -266,6 +298,57 @@ mod tests {
         assert!(ChannelKind::PresenceCache.is_presence());
         assert!(ChannelKind::PresenceCache.is_cache());
         assert!(!ChannelKind::Private.is_cache());
+    }
+
+    fn conn() -> Arc<Conn> {
+        use crate::config::{Application, ClientEvents, RateLimiting};
+
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        std::mem::forget(rx);
+
+        let app = Arc::new(Application {
+            id: "app-id".into(),
+            key: "app-key".into(),
+            secret: "app-secret".into(),
+            ping_interval: 60,
+            activity_timeout: 30,
+            allowed_origins: vec!["*".into()],
+            max_message_size: 10_000,
+            max_connections: None,
+            accept_client_events_from: ClientEvents::Members,
+            rate_limiting: RateLimiting::default(),
+        });
+
+        Arc::new(Conn::new(app, None, tx, Arc::new(crate::events::Telemetry::disabled())))
+    }
+
+    #[test]
+    fn reports_the_first_and_last_connection_of_each_user() {
+        let channel = Channel::new("presence-test".into());
+        let (one, two, other) = (conn(), conn(), conn());
+
+        assert!(channel.subscribe(one.clone(), json!({ "user_id": 1 })));
+        assert!(!channel.subscribe(two.clone(), json!({ "user_id": "1" })), "same user");
+        assert!(channel.subscribe(other.clone(), json!({ "user_id": 2 })));
+
+        // Subscribing the same socket again is not a new arrival either.
+        assert!(!channel.subscribe(one.clone(), json!({ "user_id": 1 })));
+
+        assert!(!channel.unsubscribe(&one.id).expect("member").1, "user 1 is still here");
+        assert!(channel.unsubscribe(&two.id).expect("member").1);
+        assert!(channel.unsubscribe(&two.id).is_none());
+    }
+
+    #[test]
+    fn keeps_the_connections_channel_record_in_step() {
+        let channel = Channel::new("test-channel".into());
+        let conn = conn();
+
+        channel.subscribe(conn.clone(), Value::Null);
+        assert_eq!(conn.channel_names(), vec!["test-channel"]);
+
+        channel.unsubscribe(&conn.id);
+        assert!(conn.channel_names().is_empty());
     }
 
     #[test]

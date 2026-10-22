@@ -407,6 +407,144 @@ async fn accepts_a_connection_from_an_allowed_origin() {
 }
 
 #[tokio::test]
+async fn scopes_a_whisper_to_its_one_channel_when_accepting_from_all() {
+    let mut app = application();
+    app.accept_client_events_from = reverb_rs::config::ClientEvents::All;
+
+    let server = start_with(app).await;
+
+    let (mut victim, victim_id) = server.connect().await;
+    subscribe(&mut victim, &victim_id, "private-one").await;
+    subscribe(&mut victim, &victim_id, "private-two").await;
+
+    // Never subscribed to anything, and asks for a fan-out of its choosing
+    // under a user ID it made up.
+    let (mut stranger, _) = server.connect().await;
+
+    send(
+        &mut stranger,
+        json!({
+            "event": "client-stdin",
+            "channel": "private-one",
+            "channels": ["private-one", "private-two"],
+            "user_id": 99,
+            "data": { "stdin": "rm -rf /" },
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        next_text(&mut victim).await,
+        r#"{"event":"client-stdin","channel":"private-one","data":{"stdin":"rm -rf /"}}"#
+    );
+    assert_silent(&mut victim).await;
+}
+
+#[tokio::test]
+async fn closes_a_connection_from_a_disallowed_origin() {
+    let mut app = application();
+    app.allowed_origins = vec!["laravel.com".into()];
+
+    let server = start_with(app).await;
+    let mut socket = server.open(APP_KEY, Some("http://evil.com")).await;
+
+    next_json(&mut socket).await; // The 4009 error.
+
+    // Ignoring the error must not leave a usable connection behind.
+    send(&mut socket, json!({ "event": "pusher:subscribe", "data": { "channel": "test" } })).await;
+
+    assert_closed(&mut socket).await;
+    assert!(server.server.registry.for_app(APP_ID).find("test").is_none());
+}
+
+#[tokio::test]
+async fn explains_a_rate_limit_disconnect_before_closing() {
+    let mut app = application();
+    app.rate_limiting = reverb_rs::config::RateLimiting {
+        enabled: true,
+        max_attempts: 1,
+        decay_seconds: 60,
+        terminate_on_limit: true,
+    };
+
+    let server = start_with(app).await;
+    let (mut socket, _) = server.connect().await;
+
+    send(&mut socket, json!({ "event": "pusher:ping" })).await;
+    next_text(&mut socket).await;
+
+    send(&mut socket, json!({ "event": "pusher:ping" })).await;
+
+    assert_eq!(
+        next_json(&mut socket).await["data"].as_str().unwrap(),
+        r#"{"code":4301,"message":"Rate limit exceeded"}"#
+    );
+    assert_closed(&mut socket).await;
+}
+
+#[tokio::test]
+async fn limits_how_many_channels_one_connection_may_join() {
+    let server = start().await;
+    let (mut socket, id) = server.connect().await;
+
+    for n in 0..100 {
+        subscribe(&mut socket, &id, &format!("channel-{n}")).await;
+    }
+
+    // Rejoining one already held is not a new subscription.
+    subscribe(&mut socket, &id, "channel-0").await;
+
+    send(&mut socket, json!({ "event": "pusher:subscribe", "data": { "channel": "one-more" } }))
+        .await;
+
+    assert_eq!(
+        next_json(&mut socket).await["data"].as_str().unwrap(),
+        r#"{"code":4301,"message":"Subscription limit exceeded"}"#
+    );
+}
+
+#[tokio::test]
+async fn rejects_an_over_long_channel_name() {
+    let server = start().await;
+    let (mut socket, _) = server.connect().await;
+
+    let name = "x".repeat(reverb_rs::server::MAX_CHANNEL_NAME_LENGTH + 1);
+
+    send(&mut socket, json!({ "event": "pusher:subscribe", "data": { "channel": name } })).await;
+
+    assert_eq!(
+        next_json(&mut socket).await["data"].as_str().unwrap(),
+        r#"{"code":4200,"message":"Invalid channel name"}"#
+    );
+}
+
+#[tokio::test]
+async fn leaves_only_the_channels_a_closing_connection_joined() {
+    let server = start().await;
+
+    let (mut stayer, stayer_id) = server.connect().await;
+    subscribe(&mut stayer, &stayer_id, "kept").await;
+
+    let (mut leaver, leaver_id) = server.connect().await;
+    subscribe(&mut leaver, &leaver_id, "dropped").await;
+
+    drop(leaver);
+
+    let registry = server.server.registry.for_app(APP_ID);
+
+    for _ in 0..50 {
+        if registry.find("dropped").is_none() {
+            break;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    assert!(registry.find("dropped").is_none());
+    assert_eq!(registry.find("kept").map(|channel| channel.len()), Some(1));
+}
+
+#[tokio::test]
 async fn enforces_the_connection_limit() {
     let mut app = application();
     app.max_connections = Some(1);
@@ -420,6 +558,7 @@ async fn enforces_the_connection_limit() {
         next_json(&mut second).await["data"].as_str().unwrap(),
         r#"{"code":4004,"message":"Application is over connection quota"}"#
     );
+    assert_closed(&mut second).await;
 }
 
 /// Send a frame that is deliberately not valid JSON.
@@ -428,4 +567,46 @@ async fn socket_send_raw(socket: &mut Socket, raw: &str) {
     use tokio_tungstenite::tungstenite::Message;
 
     socket.send(Message::Text(raw.into())).await.expect("send");
+}
+
+/// Two connections joining and leaving one channel as fast as they can: the
+/// channel empties and is removed constantly, and every join must still land
+/// in the channel the registry holds, never in one just removed from it.
+#[tokio::test]
+async fn never_subscribes_into_a_channel_that_was_just_removed() {
+    let server = start().await;
+    let state = server.server.clone();
+    let app = state.app_by_id(APP_ID).expect("app");
+
+    let threads: Vec<_> = (0..2)
+        .map(|_| {
+            let (state, app) = (state.clone(), app.clone());
+
+            std::thread::spawn(move || {
+                let (tx, mut rx) = tokio::sync::mpsc::channel(1024);
+                let conn = std::sync::Arc::new(reverb_rs::conn::Conn::new(
+                    app,
+                    None,
+                    tx,
+                    state.telemetry.clone(),
+                ));
+                let registry = state.registry.for_app(APP_ID);
+
+                for _ in 0..20_000 {
+                    state.subscribe(&conn, "churn", None, None).expect("subscribe");
+
+                    let held = registry.find("churn").and_then(|channel| channel.find(&conn.id));
+                    assert!(held.is_some(), "subscribed into a channel nobody can reach");
+
+                    state.unsubscribe(&conn, "churn");
+
+                    while rx.try_recv().is_ok() {}
+                }
+            })
+        })
+        .collect();
+
+    for thread in threads {
+        thread.join().expect("no orphaned subscription");
+    }
 }

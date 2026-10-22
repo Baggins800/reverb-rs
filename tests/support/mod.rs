@@ -11,7 +11,7 @@ use futures_util::{SinkExt, StreamExt};
 use reverb_rs::config::{
     Application, ClientEvents, EventsConfig, RateLimiting, ScalingConfig, ServerConfig,
 };
-use reverb_rs::events::EventSet;
+use reverb_rs::events::{EventSet, RelayOptions};
 use reverb_rs::server::{Server, sign};
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
@@ -58,9 +58,20 @@ pub async fn start() -> TestServer {
 pub async fn start_with_events(
     app: Application,
     forward: EventSet,
-) -> (TestServer, tokio::sync::mpsc::Receiver<reverb_rs::events::RelayedEvent>) {
-    let (tx, rx) = tokio::sync::mpsc::channel(4096);
-    let telemetry = Arc::new(reverb_rs::events::Telemetry::with_relay(forward, tx));
+) -> (TestServer, reverb_rs::events::RelayReceiver) {
+    let (telemetry, rx) = reverb_rs::events::Telemetry::relayed(RelayOptions::new(forward));
+    let server = Arc::new(Server::with_telemetry(config_for(app), Arc::new(telemetry)));
+
+    (serve(server).await, rx)
+}
+
+/// As [`start_with_events`], with every relay option under the test's control.
+pub async fn start_with_relay(
+    app: Application,
+    options: RelayOptions,
+) -> (TestServer, reverb_rs::events::RelayReceiver) {
+    let (telemetry, rx) = reverb_rs::events::Telemetry::relayed(options);
+    let telemetry = Arc::new(telemetry);
     let server = Arc::new(Server::with_telemetry(config_for(app), telemetry));
 
     (serve(server).await, rx)
@@ -92,7 +103,7 @@ pub async fn start_with_redis_relay(
     let client = redis::Client::open(redis_url).expect("redis client");
     let manager = redis::aio::ConnectionManager::new(client).await.expect("redis connection");
 
-    let (tx, rx) = tokio::sync::mpsc::channel(4096);
+    let (telemetry, rx) = reverb_rs::events::Telemetry::relayed(RelayOptions::new(forward));
 
     tokio::spawn(reverb_rs::events::relay_loop(
         rx,
@@ -100,9 +111,10 @@ pub async fn start_with_redis_relay(
         channel.to_string(),
         128,
         Duration::from_millis(25),
+        std::future::pending(),
     ));
 
-    let telemetry = Arc::new(reverb_rs::events::Telemetry::with_relay(forward, tx));
+    let telemetry = Arc::new(telemetry);
 
     serve(Arc::new(Server::with_telemetry(config_for(app), telemetry))).await
 }
@@ -155,12 +167,15 @@ fn config_for(app: Application) -> ServerConfig {
             batch_size: 500,
             flush_interval_ms: 100,
             queue_depth: 1024,
+            queue_bytes: 64 * 1024 * 1024,
+            message_bodies: true,
         },
         apps: vec![Arc::new(app)],
         send_queue_depth: 1024,
         ws_read_buffer_size: 4096,
         ws_write_buffer_size: 4096,
         maintenance_interval: 60,
+        max_channels_per_connection: 100,
         listen_backlog: 4096,
         restart: reverb_rs::restart::RestartWatch::Off,
     }
@@ -346,6 +361,18 @@ pub async fn assert_silent(socket: &mut Socket) {
 
     if let Ok(Some(Ok(Message::Text(text)))) = result {
         panic!("expected no frame, received {text}");
+    }
+}
+
+/// Assert that the server closes the socket, reading past any frames sent
+/// ahead of the close.
+pub async fn assert_closed(socket: &mut Socket) {
+    loop {
+        match tokio::time::timeout(FRAME_TIMEOUT, socket.next()).await {
+            Err(_) => panic!("the server did not close the socket"),
+            Ok(None | Some(Err(_)) | Some(Ok(Message::Close(_)))) => return,
+            Ok(Some(Ok(_))) => continue,
+        }
     }
 }
 

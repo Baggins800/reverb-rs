@@ -50,6 +50,8 @@ use Laravel\Reverb\Events\MessageReceived;
 use Laravel\Reverb\Events\MessageSent;
 use Laravel\Reverb\ReverbServiceProvider;
 use Orchestra\Testbench\Foundation\Application as Testbench;
+use ReverbRs\Events\MemberAdded;
+use ReverbRs\Events\MemberRemoved;
 use ReverbRs\ReverbRsServiceProvider;
 
 /**
@@ -139,6 +141,21 @@ Event::listen(ConnectionPruned::class, fn (ConnectionPruned $e) => emit([
     'socket' => $e->connection->id(),
     'data' => $e->connection->data(),
     'user_id' => $e->connection->data('user_id'),
+]));
+
+Event::listen(MemberAdded::class, fn (MemberAdded $e) => emit([
+    'event' => 'MemberAdded',
+    'channel' => $e->channel,
+    'socket' => $e->socketId,
+    'user_id' => $e->userId,
+    'user_info' => $e->userInfo,
+]));
+
+Event::listen(MemberRemoved::class, fn (MemberRemoved $e) => emit([
+    'event' => 'MemberRemoved',
+    'channel' => $e->channel,
+    'socket' => $e->socketId,
+    'user_id' => $e->userId,
 ]));
 
 if (getenv('RELAY_HARNESS_THROW')) {

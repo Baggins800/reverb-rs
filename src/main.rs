@@ -10,7 +10,7 @@ use axum_server::accept::NoDelayAcceptor;
 use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
 use clap::Parser;
 use reverb_rs::config::ServerConfig;
-use reverb_rs::events::Telemetry;
+use reverb_rs::events::{RelayOptions, Telemetry};
 use reverb_rs::pubsub::PubSub;
 use reverb_rs::server::Server;
 use tokio::net::{TcpSocket, TcpStream};
@@ -18,6 +18,9 @@ use tracing_subscriber::EnvFilter;
 
 /// How long in-flight requests get to finish once a shutdown signal arrives.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+/// How long the event relay gets to publish what is still queued at exit.
+const RELAY_DRAIN: Duration = Duration::from_secs(3);
 
 #[derive(Parser, Debug)]
 #[command(name = "reverb-rs", about = "Start the Reverb server", version)]
@@ -114,7 +117,7 @@ async fn main() -> Result<()> {
     let path = config.path.clone();
     let apps = config.apps.len();
 
-    let telemetry = match events.enabled && !events.forward.is_empty() {
+    let (telemetry, relay) = match events.enabled && !events.forward.is_empty() {
         true => {
             let client = redis::Client::open(events.redis_url.as_str())
                 .context("invalid Redis URL for the event relay")?;
@@ -123,26 +126,31 @@ async fn main() -> Result<()> {
                 .await
                 .context("failed to connect to Redis for the event relay")?;
 
-            let (tx, rx) = tokio::sync::mpsc::channel(events.queue_depth);
+            let (telemetry, rx) = Telemetry::relayed(RelayOptions::from(&events));
+            let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
 
-            tokio::spawn(reverb_rs::events::relay_loop(
+            let task = tokio::spawn(reverb_rs::events::relay_loop(
                 rx,
                 manager,
                 events.channel.clone(),
                 events.batch_size,
                 Duration::from_millis(events.flush_interval_ms),
+                async move {
+                    let _ = stopped.await;
+                },
             ));
 
             tracing::info!(
                 channel = %events.channel,
                 forwarding = ?events.forward.names(),
                 message_sample_rate = events.message_sample_rate,
+                message_bodies = events.message_bodies,
                 "relaying events to laravel"
             );
 
-            Arc::new(Telemetry::sampled(events.forward, tx, events.message_sample_rate))
+            (Arc::new(telemetry), Some((stop, task)))
         }
-        false => Arc::new(Telemetry::disabled()),
+        false => (Arc::new(Telemetry::disabled()), None),
     };
 
     let server = Arc::new(Server::with_telemetry(config, telemetry));
@@ -206,6 +214,17 @@ async fn main() -> Result<()> {
                 .acceptor(NoDelayAcceptor::new())
                 .serve(service)
                 .await?;
+        }
+    }
+
+    // Disconnecting every client queued a `channel_removed` or
+    // `member_removed` for each of them; publish those before exiting, or
+    // listeners go on believing every connection is still there.
+    if let Some((stop, task)) = relay {
+        let _ = stop.send(());
+
+        if tokio::time::timeout(RELAY_DRAIN, task).await.is_err() {
+            tracing::warn!("gave up publishing queued events to redis at shutdown");
         }
     }
 

@@ -66,6 +66,10 @@ async fn serve(
     // backpressure: a client that cannot drain its queue also stops being read.
     loop {
         tokio::select! {
+            // A client too far behind to queue a close behind its backlog is
+            // dropped at once; draining that backlog is what it cannot do.
+            () = conn.aborted() => break,
+
             outgoing = rx.recv() => {
                 let Some(frame) = outgoing else { break };
 

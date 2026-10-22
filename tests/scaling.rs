@@ -172,3 +172,35 @@ async fn terminates_a_user_across_the_cluster() {
 
     assert_eq!(closed, Ok(true), "the connection should have been terminated");
 }
+
+#[tokio::test]
+async fn delivers_once_to_a_subscriber_on_the_publishing_node() {
+    let Some((one, _two)) = cluster("local-once").await else {
+        return;
+    };
+
+    let (mut socket, id) = one.connect().await;
+    subscribe(&mut socket, &id, "test-channel").await;
+
+    one.trigger("test-channel", "App\\Events\\TestEvent", json!({})).await;
+
+    // Delivered here before publishing; the echo from Redis is ignored.
+    assert_eq!(next_json(&mut socket).await["event"], "App\\Events\\TestEvent");
+    assert_silent(&mut socket).await;
+}
+
+#[tokio::test]
+async fn lists_the_users_of_a_channel_held_only_by_another_node() {
+    let Some((one, two)) = cluster("remote-users").await else {
+        return;
+    };
+
+    let (mut socket, id) = one.connect().await;
+    subscribe_with_data(&mut socket, &id, "presence-test", Some(json!({ "user_id": 3 }))).await;
+
+    let response =
+        two.api("GET", &format!("/apps/{APP_ID}/channels/presence-test/users"), &[], None).await;
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.text().await.unwrap(), r#"{"users":[{"id":3}]}"#);
+}

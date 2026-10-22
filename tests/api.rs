@@ -113,6 +113,28 @@ async fn triggers_a_batch_of_events() {
 }
 
 #[tokio::test]
+async fn sends_nothing_from_a_batch_with_an_invalid_item() {
+    let server = start().await;
+
+    let (mut socket, id) = server.connect().await;
+    subscribe(&mut socket, &id, "test-channel").await;
+
+    let body = json!({
+        "batch": [
+            { "name": "First", "channel": "test-channel", "data": "{}" },
+            { "name": "Second", "channel": "test-channel" },
+        ]
+    })
+    .to_string();
+
+    let response =
+        server.api("POST", &format!("/apps/{APP_ID}/batch_events"), &[], Some(&body)).await;
+
+    assert_eq!(response.status(), 422);
+    assert_silent(&mut socket).await;
+}
+
+#[tokio::test]
 async fn returns_per_event_info_for_a_batch() {
     let server = start().await;
 

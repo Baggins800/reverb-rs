@@ -14,6 +14,7 @@ use axum::response::{IntoResponse, Response};
 use md5::{Digest, Md5};
 use serde_json::{Value, json};
 
+use crate::channel::ChannelKind;
 use crate::config::Application;
 use crate::metrics::{self, MetricRequest, MetricType};
 use crate::server::{Server, payload_map, verify_signature};
@@ -353,8 +354,9 @@ pub async fn batch_events(
         return Ok(validation_error("batch", "The batch field is required."));
     };
 
-    let mut requested_info = false;
-    let mut pending: Vec<Option<MetricRequest>> = Vec::with_capacity(batch.len());
+    // Validate every item before dispatching any, as Reverb does: a 422 must
+    // mean nothing was sent, or a retrying broadcaster sends it all twice.
+    let mut items = Vec::with_capacity(batch.len());
 
     for item in batch {
         let (Some(name), Some(data), Some(channel)) = (
@@ -365,6 +367,13 @@ pub async fn batch_events(
             return Ok(validation_error("batch", "The batch field is invalid."));
         };
 
+        items.push((item, name, data, channel));
+    }
+
+    let mut requested_info = false;
+    let mut pending: Vec<Option<MetricRequest>> = Vec::with_capacity(items.len());
+
+    for (item, name, data, channel) in items {
         server.dispatch(
             &app,
             payload_map([
@@ -465,11 +474,18 @@ pub async fn channel_users(
     let request = verify(&server, &app_id, &method, uri.path(), uri.query().unwrap_or(""), &[])?;
     let app = request.app.clone();
 
-    let Some(found) = server.registry.for_app(&app.id).find(&channel) else {
-        return Ok(json_response(StatusCode::NOT_FOUND, &json!({})));
-    };
+    // Ask the whole cluster whether the channel exists: with scaling on, it
+    // may have members only on other nodes.
+    let occupancy =
+        MetricRequest::new(MetricType::Channel, &app.id).channel(channel.clone()).info("occupied");
 
-    if !found.kind.is_presence() {
+    let occupied = gather(&server, &app, occupancy).await;
+
+    if occupied.get("occupied").and_then(Value::as_bool) != Some(true) {
+        return Ok(json_response(StatusCode::NOT_FOUND, &json!({})));
+    }
+
+    if !ChannelKind::of(&channel).is_presence() {
         return Ok(json_response(StatusCode::BAD_REQUEST, &json!({})));
     }
 
